@@ -203,9 +203,11 @@ public class KafkaOffsetGen {
     Set<TopicAndPartition> topicPartitions = either.right().get();
 
     // Determine the offset ranges to read from
+    HashMap<TopicAndPartition, KafkaCluster.LeaderOffset> checkpointOffsets;
     HashMap<TopicAndPartition, KafkaCluster.LeaderOffset> fromOffsets;
     if (lastCheckpointStr.isPresent()) {
-      fromOffsets = CheckpointUtils.strToOffsets(lastCheckpointStr.get());
+      checkpointOffsets = CheckpointUtils.strToOffsets(lastCheckpointStr.get());
+      fromOffsets = checkupValidOffsets(cluster, checkpointOffsets, topicPartitions);
     } else {
       KafkaResetOffsetStrategies autoResetValue =  KafkaResetOffsetStrategies.valueOf(
               props.getString("auto.offset.reset", Config.DEFAULT_AUTO_RESET_OFFSET.toString()).toUpperCase());
@@ -233,6 +235,28 @@ public class KafkaOffsetGen {
     OffsetRange[] offsetRanges = CheckpointUtils.computeOffsetRanges(fromOffsets, toOffsets, numEvents);
 
     return offsetRanges;
+  }
+
+  /***
+   * check up checkpoint offsets is valid or not, if true,  return checkpoint offsets, else return earliest offsets
+   * @param cluster
+   * @param checkpointOffsets
+   * @return
+   */
+  private HashMap<TopicAndPartition, KafkaCluster.LeaderOffset> checkupValidOffsets(KafkaCluster cluster,
+                                                                                    HashMap<TopicAndPartition, KafkaCluster.LeaderOffset> checkpointOffsets,
+                                                                                    Set<TopicAndPartition> topicPartitions ) {
+    java.util.Set<TopicAndPartition> partitions = checkpointOffsets.keySet();
+    HashMap<TopicAndPartition, KafkaCluster.LeaderOffset> fromOffsets;
+    fromOffsets = new HashMap(ScalaHelpers.toJavaMap(
+            cluster.getEarliestLeaderOffsets(topicPartitions).right().get()));
+    for (TopicAndPartition partition: partitions) {
+      if (checkpointOffsets.get(partition).offset() < fromOffsets.get(partition).offset() ) {
+        log.info("Checkpoint offset is invalid, return earliest offsets.");
+        return fromOffsets;
+      }
+    }
+    return checkpointOffsets;
   }
 
   public String getTopicName() {
