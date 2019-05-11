@@ -118,6 +118,13 @@ public abstract class HoodieIndex<T extends HoodieRecordPayload> implements Seri
   public abstract boolean isImplicitWithStorage();
 
 
+  /***
+   * HBASE hbase
+   * INMEMPORY  内存
+   * BLOOM bloom索引通过在一个表中每行上结合一个bloom过滤器，来建立。  详细： https://blog.csdn.net/pg_hgdb/article/details/80321921
+   * GLOBAL_BLOOM
+   * BUCKTED 分桶索引
+   */
   public enum IndexType {
     HBASE, INMEMORY, BLOOM, GLOBAL_BLOOM, BUCKETED
   }

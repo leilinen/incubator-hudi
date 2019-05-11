@@ -185,6 +185,7 @@ public class HoodieDeltaStreamer implements Serializable {
     Timer.Context overallTimerContext = metrics.getOverallTimerContext();
     // Retrieve the previous round checkpoints, if any
     Optional<String> resumeCheckpointStr = Optional.empty();
+    // commit time line , get resume checkpoint str
     if (commitTimelineOpt.isPresent()) {
       Optional<HoodieInstant> lastCommit = commitTimelineOpt.get().lastInstant();
       if (lastCommit.isPresent()) {
@@ -199,6 +200,7 @@ public class HoodieDeltaStreamer implements Serializable {
         }
       }
     } else {
+      // first time to insert
       HoodieTableMetaClient.initTableType(jssc.hadoopConfiguration(), cfg.targetBasePath,
           cfg.storageType, cfg.targetTableName, "archived");
     }
@@ -208,6 +210,7 @@ public class HoodieDeltaStreamer implements Serializable {
     final String checkpointStr;
     final SchemaProvider schemaProvider;
     if (transformer != null) {
+      // transformer 默认没有设置
       // Transformation is needed. Fetch New rows in Row Format, apply transformation and then convert them
       // to generic records for writing
       InputBatch<Dataset<Row>> dataAndCheckpoint = formatAdapter.fetchNewDataInRowFormat(
@@ -237,6 +240,7 @@ public class HoodieDeltaStreamer implements Serializable {
       return;
     }
 
+    // register avro schemas
     registerAvroSchemas(schemaProvider);
 
     JavaRDD<GenericRecord> avroRDD = avroRDDOptional.get();
@@ -246,10 +250,10 @@ public class HoodieDeltaStreamer implements Serializable {
       return new HoodieRecord<>(keyGenerator.getKey(gr), payload);
     });
 
-    // filter dupes if needed
     HoodieWriteConfig hoodieCfg = getHoodieClientConfig(schemaProvider);
+    // filter dupes if needed
     if (cfg.filterDupes) {
-      // turn upserts to insert
+      // turn upserts to insert  ???? why do this
       cfg.operation = cfg.operation == Operation.UPSERT ? Operation.INSERT : cfg.operation;
       records = DataSourceUtils.dropDuplicates(jssc, records, hoodieCfg);
 

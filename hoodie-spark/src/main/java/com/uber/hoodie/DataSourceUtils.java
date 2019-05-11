@@ -103,6 +103,7 @@ public class DataSourceUtils {
   }
 
   /**
+   * 创建实例化对象
    * Create a payload class via reflection, passing in an ordering/precombine value.
    */
   public static HoodieRecordPayload createPayload(String payloadClass, GenericRecord record,

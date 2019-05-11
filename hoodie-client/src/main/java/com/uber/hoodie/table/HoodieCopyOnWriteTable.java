@@ -713,6 +713,7 @@ public class HoodieCopyOnWriteTable<T extends HoodieRecordPayload> extends Hoodi
         WorkloadStat pStat = profile.getWorkloadStat(partitionPath);
         if (pStat.getNumInserts() > 0) {
 
+          // 获取路径下的文件列表
           List<SmallFile> smallFiles = getSmallFiles(partitionPath);
           logger.info("For partitionPath : " + partitionPath + " Small Files => " + smallFiles);
 

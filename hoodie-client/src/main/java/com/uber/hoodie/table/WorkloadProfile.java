@@ -56,6 +56,7 @@ public class WorkloadProfile<T extends HoodieRecordPayload> implements Serializa
     buildProfile();
   }
 
+  // what to do ?
   private void buildProfile() {
 
     Map<Tuple2<String, Option<HoodieRecordLocation>>, Long> partitionLocationCounts = taggedRecords

@@ -369,6 +369,7 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
       }
 
       if (content.isPresent()) {
+        // 往hdfs中写入metadata数据
         FSDataOutputStream fsout = metaClient.getFs().create(fullPath, true);
         fsout.write(content.get());
         fsout.close();

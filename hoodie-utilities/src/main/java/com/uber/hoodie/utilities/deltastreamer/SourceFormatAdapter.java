@@ -81,6 +81,8 @@ public final class SourceFormatAdapter {
   /**
    * Fetch new data in row format. If the source provides data in different format, they are translated
    * to Row format
+   *
+   * 把所有的数据集都转换为行格式
    * @param lastCkptStr
    * @param sourceLimit
    * @return

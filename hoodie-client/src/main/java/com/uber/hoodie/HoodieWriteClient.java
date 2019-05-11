@@ -151,7 +151,9 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> implements Seriali
     HoodieTable<T> table = HoodieTable.getHoodieTable(
         new HoodieTableMetaClient(jsc.hadoopConfiguration(), config.getBasePath(), true), config, jsc);
 
+    // 现在还不清楚taglocation的作用是什么，貌似是获取索引 index
     JavaRDD<HoodieRecord<T>> recordsWithLocation = index.tagLocation(hoodieRecords, jsc, table);
+    // 过滤掉没有获取到location的数据
     return recordsWithLocation.filter(v1 -> !v1.isCurrentLocationKnown());
   }
 
@@ -418,11 +420,13 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> implements Seriali
     // Cache the tagged records, so we don't end up computing both
     // TODO: Consistent contract in HoodieWriteClient regarding preppedRecord storage level handling
     if (preppedRecords.getStorageLevel() == StorageLevel.NONE()) {
+        // rdd 持久化  自定义缓存级别
       preppedRecords.persist(StorageLevel.MEMORY_AND_DISK_SER());
     } else {
       logger.info("RDD PreppedRecords was persisted at: " + preppedRecords.getStorageLevel());
     }
 
+    // save metadata into inflight
     WorkloadProfile profile = null;
     if (hoodieTable.isWorkloadProfileNeeded()) {
       profile = new WorkloadProfile(preppedRecords);
@@ -1095,7 +1099,6 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> implements Seriali
   }
 
   private HoodieTable getTableAndInitCtx() {
-    // Create a Hoodie table which encapsulated the commits and files visible
     // Create a Hoodie table which encapsulated the commits and files visible
     HoodieTable table = HoodieTable.getHoodieTable(
         new HoodieTableMetaClient(jsc.hadoopConfiguration(), config.getBasePath(), true), config, jsc);
