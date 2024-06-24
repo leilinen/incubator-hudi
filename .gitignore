@@ -1,11 +1,14 @@
 # Directories #
 /build/
 target/
- 
+metastore_db/
+.mvn/
+
 # OS Files #
 .DS_Store
  
 *.class
+.java-version
  
 # Package Files #
 *.jar
@@ -14,6 +17,7 @@ target/
 *.war
 *.ear
 *.db
+*.patch 
  
 ######################
 # OSX
@@ -59,10 +63,13 @@ local.properties
 # IntelliJ specific files/directories #
 #######################################
 .out
-.idea
+.idea/*
+!.idea/vcs.xml
+!.idea/icon.png
 *.ipr
 *.iws
 *.iml
+*.log
 
 #######################################
 # Maven
@@ -73,5 +80,6 @@ dependency-reduced-pom.xml
 #######################################
 # Docker
 #######################################
-hoodie-integ-test/compose_env
-
+hudi-integ-test/compose_env
+node_modules
+package-lock.json
