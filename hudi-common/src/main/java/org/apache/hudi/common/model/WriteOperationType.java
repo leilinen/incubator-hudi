@@ -41,6 +41,7 @@ public enum WriteOperationType {
   BOOTSTRAP("bootstrap"),
   // insert overwrite with static partitioning
   INSERT_OVERWRITE("insert_overwrite"),
+  BUCKET_RESCALE("bucket_rescale"),
   // cluster
   CLUSTER("cluster"),
   // delete partition
@@ -55,7 +56,7 @@ public enum WriteOperationType {
   // alter schema
   ALTER_SCHEMA("alter_schema"),
   // log compact
-  LOG_COMPACT("logcompact"),
+  LOG_COMPACT("log_compact"),
   // used for old version
   UNKNOWN("unknown");
 
@@ -100,6 +101,10 @@ public enum WriteOperationType {
         return INDEX;
       case "alter_schema":
         return ALTER_SCHEMA;
+      case "log_compact":
+        return LOG_COMPACT;
+      case "bucket_rescale":
+        return BUCKET_RESCALE;
       case "unknown":
         return UNKNOWN;
       default:
@@ -123,10 +128,14 @@ public enum WriteOperationType {
     return operationType == INSERT_OVERWRITE || operationType == INSERT_OVERWRITE_TABLE;
   }
 
+  public boolean isInsertOverwriteOrDeletePartition() {
+    return this == INSERT_OVERWRITE || this == INSERT_OVERWRITE_TABLE || this == DELETE_PARTITION;
+  }
+
   /**
    * Whether the operation changes the dataset.
    */
-  public static boolean isDataChange(WriteOperationType operation) {
+  public static boolean yieldChanges(WriteOperationType operation) {
     return operation == WriteOperationType.INSERT
         || operation == WriteOperationType.UPSERT
         || operation == WriteOperationType.UPSERT_PREPPED
@@ -163,5 +172,13 @@ public enum WriteOperationType {
 
   public static boolean isDelete(WriteOperationType operation) {
     return operation == DELETE || operation == DELETE_PREPPED;
+  }
+
+  public static boolean isPreppedWriteOperation(WriteOperationType operationType) {
+    return operationType == BULK_INSERT_PREPPED || operationType == INSERT_PREPPED | operationType == UPSERT_PREPPED || operationType == DELETE_PREPPED;
+  }
+
+  public static boolean isCompactionOrClustering(WriteOperationType operationType) {
+    return operationType == COMPACT || operationType == CLUSTER;
   }
 }

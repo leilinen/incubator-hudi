@@ -19,12 +19,12 @@
     <parent>
         <artifactId>hudi</artifactId>
         <groupId>org.apache.hudi</groupId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.1.0-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>hudi-aws</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.1.0-SNAPSHOT</version>
 
     <name>hudi-aws</name>
     <packaging>jar</packaging>
@@ -42,6 +42,11 @@
         </dependency>
 
         <!-- Hoodie -->
+        <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-client-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.apache.hudi</groupId>
             <artifactId>hudi-common</artifactId>
@@ -169,6 +174,13 @@
             <version>${aws.sdk.version}</version>
         </dependency>
 
+        <!-- https://mvnrepository.com/artifact/com.amazonaws/aws-java-sdk-s3 -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+
         <!-- https://mvnrepository.com/artifact/com.amazonaws/aws-java-sdk-sqs -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -198,6 +210,28 @@
             <groupId>org.apache.hudi</groupId>
             <artifactId>hudi-tests-common</artifactId>
             <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-client-common</artifactId>
+            <version>${project.version}</version>
+            <classifier>tests</classifier>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-inline</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>localstack</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -251,6 +285,7 @@
                                     <name>amazon/dynamodb-local:${dynamodb-local.version}</name>
                                     <alias>it-database</alias>
                                     <run>
+                                        <platform>linux/amd64</platform>
                                         <ports>
                                             <port>${dynamodb-local.port}:${dynamodb-local.port}</port>
                                         </ports>
@@ -263,11 +298,12 @@
                                     </run>
                                 </image>
                                 <image>
-                                    <name>motoserver/moto:${moto.version}</name>
+                                    <name>apachehudi/moto:${moto.version}</name>
                                     <alias>it-aws</alias>
                                     <run>
+                                        <platform>linux/amd64</platform>
                                         <ports>
-                                            <port>${moto.port}:${moto.port}</port>
+                                            <port>${moto.port}:5000</port>
                                         </ports>
                                         <wait>
                                             <http>

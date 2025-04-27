@@ -24,11 +24,9 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,18 +50,18 @@ public class FourToFiveUpgradeHandler implements UpgradeHandler {
       HoodieTable table = upgradeDowngradeHelper.getTable(config, context);
 
       if (!config.doSkipDefaultPartitionValidation() && hasDefaultPartitionPath(config, table)) {
-        LOG.error(String.format("\"%s\" partition detected. From 0.12, we are changing the default partition in hudi to %s "
+        LOG.error(String.format("\"%s\" partition detected. From 0.12, we are changing the default partition in hudi to \"%s\"."
                 + " Please read and write back the data in \"%s\" partition in hudi to new partition path \"%s\". \"\n"
-                + " Sample spark command to use to re-write the data: \n\n"
-                + " val df = spark.read.format(\"hudi\").load(HUDI_TABLE_PATH).filter(col(\"PARTITION_PATH_COLUMN\") === \"%s\"); \t \n\n"
-                + " df.drop(\"_hoodie_commit_time\").drop(\"_hoodie_commit_seqno\").drop(\"_hoodie_record_key\")\"\n"
-                + " .drop(\"_hoodie_partition_path\").drop(\"_hoodie_file_name\").withColumn(PARTITION_PATH_COLUMN,\"%s\")\"\n"
-                + " .write.options(writeOptions).mode(Append).save(HUDI_TABLE_PATH);\t\n\"\n"
-                + " Please fix values for PARTITION_PATH_COLUMN, HUDI_TABLE_PATH and set all write configs in above command before running. "
-                + " Also do delete the records in old partition once above command succeeds. "
-                + " Sample spark command to delete old partition records: \n\n"
-                + " val df = spark.read.format(\"hudi\").load(HUDI_TABLE_PATH).filter(col(\"PARTITION_PATH_COLUMN\") === \"%s\"); \t \n\n"
-                + " df.write.option(\"hoodie.datasource.write.operation\",\"delete\").options(writeOptions).mode(Append).save(HUDI_TABLE_PATH);\t\n\"\n",
+                + "Sample spark command to use to re-write the data: \n\n"
+                + "val df = spark.read.format(\"hudi\").load(HUDI_TABLE_PATH).filter(col(\"PARTITION_PATH_COLUMN\") === \"%s\"); \t \n\n"
+                + "df.drop(\"_hoodie_commit_time\").drop(\"_hoodie_commit_seqno\").drop(\"_hoodie_record_key\")\n"
+                + " .drop(\"_hoodie_partition_path\").drop(\"_hoodie_file_name\").withColumn(PARTITION_PATH_COLUMN,\"%s\")\n"
+                + " .write.format(\"hudi\").options(writeOptions).mode(Append).save(HUDI_TABLE_PATH);\n\n"
+                + "Please fix values for PARTITION_PATH_COLUMN, HUDI_TABLE_PATH and set all write configs in above command before running. "
+                + "Also do delete the records in old partition once above command succeeds. "
+                + "Sample spark command to delete old partition records: \n\n"
+                + "val df = spark.read.format(\"hudi\").load(HUDI_TABLE_PATH).filter(col(\"PARTITION_PATH_COLUMN\") === \"%s\");\n\n"
+                + "df.write.format(\"hudi\").option(\"hoodie.datasource.write.operation\",\"delete\").options(writeOptions).mode(Append).save(HUDI_TABLE_PATH);\t\n\n",
             DEPRECATED_DEFAULT_PARTITION_PATH, DEFAULT_PARTITION_PATH, DEPRECATED_DEFAULT_PARTITION_PATH, DEFAULT_PARTITION_PATH,
             DEPRECATED_DEFAULT_PARTITION_PATH, DEFAULT_PARTITION_PATH, DEPRECATED_DEFAULT_PARTITION_PATH));
         throw new HoodieException(String.format("Old deprecated \"%s\" partition found in hudi table. This needs a migration step before we can upgrade ",
@@ -76,7 +74,7 @@ public class FourToFiveUpgradeHandler implements UpgradeHandler {
     }
   }
 
-  private boolean hasDefaultPartitionPath(HoodieWriteConfig config, HoodieTable  table) throws IOException {
+  private boolean hasDefaultPartitionPath(HoodieWriteConfig config, HoodieTable table) throws IOException {
     HoodieTableConfig tableConfig = table.getMetaClient().getTableConfig();
     if (!tableConfig.isTablePartitioned()) {
       return false;
@@ -88,7 +86,7 @@ public class FourToFiveUpgradeHandler implements UpgradeHandler {
       String[] partitions = tableConfig.getPartitionFields().get();
       checkPartitionPath = partitions[0] + "=" + DEPRECATED_DEFAULT_PARTITION_PATH;
     }
-    FileSystem fs = new Path(config.getBasePath()).getFileSystem((Configuration) table.getStorageConf().unwrap());
-    return fs.exists(new Path(config.getBasePath() + "/" + checkPartitionPath));
+
+    return table.getStorage().exists(new StoragePath(config.getBasePath() + "/" + checkPartitionPath));
   }
 }

@@ -28,29 +28,31 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.StoragePathInfo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.common.table.timeline.MetadataConversionUtils.convertCommitMetadataToJsonBytes;
-import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.deserializeCommitMetadata;
-import static org.apache.hudi.common.util.StringUtils.fromUTF8Bytes;
+import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.deserializeAvroMetadata;
 
 /**
- * All the metadata that gets stored along with a commit.
+ * Represents commit metadata.
+ *
+ * @deprecated As of Hudi version 1.1.0
+ * Please use the standard Avro-generated model
+ * {@link org.apache.hudi.avro.model.HoodieCommitMetadata} instead.
+ * This class may be removed in a future release.
  */
+@Deprecated
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class HoodieCommitMetadata implements Serializable {
 
@@ -248,30 +250,16 @@ public class HoodieCommitMetadata implements Serializable {
    * parse the bytes of deltacommit, and get the base file and the log files belonging to this
    * provided file group.
    */
-  // TODO: refactor this method to avoid doing the json tree walking (HUDI-4822).
-  public static Option<Pair<String, List<String>>> getFileSliceForFileGroupFromDeltaCommit(byte[] bytes, HoodieFileGroupId fileGroupId) {
+  public static Option<Pair<String, List<String>>> getFileSliceForFileGroupFromDeltaCommit(InputStream inputStream, HoodieFileGroupId fileGroupId) {
     try {
-      String jsonStr = fromUTF8Bytes(
-          convertCommitMetadataToJsonBytes(deserializeCommitMetadata(bytes), org.apache.hudi.avro.model.HoodieCommitMetadata.class));
-      if (jsonStr.isEmpty()) {
-        return Option.empty();
-      }
-      JsonNode ptToWriteStatsMap = JsonUtils.getObjectMapper().readTree(jsonStr).get("partitionToWriteStats");
-      Iterator<Map.Entry<String, JsonNode>> pts = ptToWriteStatsMap.fields();
-      while (pts.hasNext()) {
-        Map.Entry<String, JsonNode> ptToWriteStats = pts.next();
-        if (ptToWriteStats.getValue().isArray()) {
-          for (JsonNode writeStat : ptToWriteStats.getValue()) {
-            HoodieFileGroupId fgId = new HoodieFileGroupId(ptToWriteStats.getKey(), writeStat.get("fileId").asText());
-            if (fgId.equals(fileGroupId)) {
-              String baseFile = writeStat.get("baseFile").asText();
-              ArrayNode logFilesNode = (ArrayNode) writeStat.get("logFiles");
-              List<String> logFiles = new ArrayList<>();
-              for (JsonNode logFile : logFilesNode) {
-                logFiles.add(logFile.asText());
-              }
-              return Option.of(Pair.of(baseFile, logFiles));
-            }
+      org.apache.hudi.avro.model.HoodieCommitMetadata commitMetadata = deserializeAvroMetadata(inputStream, org.apache.hudi.avro.model.HoodieCommitMetadata.class);
+      Map<String,List<org.apache.hudi.avro.model.HoodieWriteStat>> partitionToWriteStatsMap =
+              commitMetadata.getPartitionToWriteStats();
+      for (Map.Entry<String, List<org.apache.hudi.avro.model.HoodieWriteStat>> partitionToWriteStat: partitionToWriteStatsMap.entrySet()) {
+        for (org.apache.hudi.avro.model.HoodieWriteStat writeStat: partitionToWriteStat.getValue()) {
+          HoodieFileGroupId fgId = new HoodieFileGroupId(partitionToWriteStat.getKey(), writeStat.getFileId());
+          if (fgId.equals(fileGroupId)) {
+            return Option.of(Pair.of(writeStat.getBaseFile() == null ? "" : writeStat.getBaseFile(), writeStat.getLogFiles()));
           }
         }
       }
@@ -510,20 +498,6 @@ public class HoodieCommitMetadata implements Serializable {
     int result = partitionToWriteStats.hashCode();
     result = 31 * result + compacted.hashCode();
     return result;
-  }
-
-  public static <T> T fromBytes(byte[] bytes, Class<T> clazz) throws IOException {
-    try {
-      if (bytes.length == 0) {
-        return clazz.newInstance();
-      }
-      return fromJsonString(
-          fromUTF8Bytes(
-              convertCommitMetadataToJsonBytes(deserializeCommitMetadata(bytes), org.apache.hudi.avro.model.HoodieCommitMetadata.class)),
-          clazz);
-    } catch (Exception e) {
-      throw new IOException("unable to read commit metadata for bytes length: " + bytes.length, e);
-    }
   }
 
   @Override

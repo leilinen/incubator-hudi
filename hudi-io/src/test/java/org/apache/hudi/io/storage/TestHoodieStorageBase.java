@@ -22,6 +22,7 @@ package org.apache.hudi.io.storage;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.io.SeekableDataInputStream;
 import org.apache.hudi.io.util.IOUtils;
+import org.apache.hudi.storage.HoodieInstantWriter;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.StoragePathInfo;
@@ -140,7 +141,7 @@ public abstract class TestHoodieStorageBase {
 
     StoragePath path3 = new StoragePath(getTempDir(), "testCreateAppendAndRead/3.file");
     assertFalse(storage.exists(path3));
-    storage.createImmutableFileInPath(path3, Option.of(data));
+    storage.createImmutableFileInPath(path3, Option.of(HoodieInstantWriter.convertByteArrayToWriter(data)));
     validatePathInfo(storage, path3, data, false);
 
     StoragePath path4 = new StoragePath(getTempDir(), "testCreateAppendAndRead/4");
@@ -268,6 +269,41 @@ public abstract class TestHoodieStorageBase {
         storage.globEntries(
             new StoragePath(getTempDir(), "x/*/*.file"),
             e -> e.getParent().getName().equals("y") && e.getName().contains("1")));
+  }
+
+  @Test
+  public void testListingWithFilter() throws IOException {
+    HoodieStorage storage = getStorage();
+    // Full list:
+    // w/1.file
+    // w/2.file
+    // x/1.file
+    // x/2.file
+    // x/y/1.file
+    // x/y/2.file
+    // x/z/1.file
+    // x/z/2.file
+    prepareFilesOnStorage(storage);
+
+    validatePathInfoList(
+        Arrays.stream(new StoragePathInfo[] {
+            getStoragePathInfo("x/y/2.file", false)
+        }).collect(Collectors.toList()),
+        storage.listDirectEntries(
+            new StoragePath(getTempDir(), "x/y"),
+            path -> path.getName().contains("2")));
+
+    validatePathInfoList(
+        Arrays.stream(new StoragePathInfo[] {
+            getStoragePathInfo("w/2.file", false),
+            getStoragePathInfo("x/y/2.file", false),
+            getStoragePathInfo("x/z/2.file", false)
+        }).collect(Collectors.toList()),
+        storage.listDirectEntries(Arrays.stream(new StoragePath[] {
+            new StoragePath(getTempDir(), "w"),
+            new StoragePath(getTempDir(), "x/y"),
+            new StoragePath(getTempDir(), "x/z")
+        }).collect(Collectors.toList()), path -> path.getName().equals("2.file")));
   }
 
   @Test

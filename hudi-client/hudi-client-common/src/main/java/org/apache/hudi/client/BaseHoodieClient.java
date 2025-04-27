@@ -24,15 +24,13 @@ import org.apache.hudi.client.embedded.EmbeddedTimelineService;
 import org.apache.hudi.client.heartbeat.HoodieHeartbeatClient;
 import org.apache.hudi.client.transaction.TransactionManager;
 import org.apache.hudi.client.utils.TransactionUtils;
-import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.TimeGenerator;
 import org.apache.hudi.common.table.timeline.TimeGenerators;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -41,15 +39,14 @@ import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieWriteConflictException;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metrics.HoodieMetrics;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.HoodieStorageUtils;
+import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.table.HoodieTable;
 
 import com.codahale.metrics.Timer;
-import org.apache.hadoop.conf.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,7 +67,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
   private static final long serialVersionUID = 1L;
   protected final transient HoodieStorage storage;
   protected final transient HoodieEngineContext context;
-  protected final transient Configuration hadoopConf;
+  protected final transient StorageConfiguration<?> storageConf;
   protected final transient HoodieMetrics metrics;
   protected final HoodieWriteConfig config;
   protected final String basePath;
@@ -92,8 +89,8 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
 
   protected BaseHoodieClient(HoodieEngineContext context, HoodieWriteConfig clientConfig,
       Option<EmbeddedTimelineService> timelineServer) {
-    this.hadoopConf = context.getStorageConf().unwrapAs((Configuration.class));
-    this.storage = HoodieStorageUtils.getStorage(clientConfig.getBasePath(), HadoopFSUtils.getStorageConf(hadoopConf));
+    this.storageConf = context.getStorageConf();
+    this.storage = HoodieStorageUtils.getStorage(clientConfig.getBasePath(), storageConf);
     this.context = context;
     this.basePath = clientConfig.getBasePath();
     this.config = clientConfig;
@@ -105,7 +102,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
     this.metrics = new HoodieMetrics(config, storage);
     this.txnManager = new TransactionManager(config, storage);
     this.timeGenerator = TimeGenerators.getTimeGenerator(
-        config.getTimeGeneratorConfig(), HadoopFSUtils.getStorageConf(hadoopConf));
+        config.getTimeGeneratorConfig(), storageConf);
     startEmbeddedServerView();
     initWrapperFSMetrics();
     runClientInitCallbacks();
@@ -141,7 +138,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
       if (!timelineServer.isPresent()) {
         // Run Embedded Timeline Server
         try {
-          timelineServer = EmbeddedTimelineServerHelper.createEmbeddedTimelineService(context, config);
+          timelineServer = Option.of(EmbeddedTimelineServerHelper.createEmbeddedTimelineService(context, config));
         } catch (IOException e) {
           LOG.warn("Unable to start timeline service. Proceeding as if embedded server is disabled", e);
           stopEmbeddedServerView(false);
@@ -183,28 +180,20 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
 
   protected HoodieTableMetaClient createMetaClient(boolean loadActiveTimelineOnLoad) {
     return HoodieTableMetaClient.builder()
-        .setConf(HadoopFSUtils.getStorageConfWithCopy(hadoopConf)).setBasePath(config.getBasePath())
-        .setLoadActiveTimelineOnLoad(loadActiveTimelineOnLoad).setConsistencyGuardConfig(config.getConsistencyGuardConfig())
-        .setLayoutVersion(Option.of(new TimelineLayoutVersion(config.getTimelineLayoutVersion())))
+        .setConf(storageConf.newInstance())
+        .setBasePath(config.getBasePath())
+        .setLoadActiveTimelineOnLoad(loadActiveTimelineOnLoad)
+        .setConsistencyGuardConfig(config.getConsistencyGuardConfig())
         .setTimeGeneratorConfig(config.getTimeGeneratorConfig())
         .setFileSystemRetryConfig(config.getFileSystemRetryConfig())
         .setMetaserverConfig(config.getProps()).build();
   }
-
-  /**
-   * Returns next instant time in milliseconds. An explicit Lock is enabled in the context.
-   *
-   * @param milliseconds Milliseconds to add to current time while generating the new instant time.
-   */
-  public String createNewInstantTime(long milliseconds) {
-    return HoodieActiveTimeline.createNewInstantTime(true, timeGenerator, milliseconds);
-  }
-
+  
   /**
    * Returns next instant time in the correct format. An explicit Lock is enabled in the context.
    */
   public String createNewInstantTime() {
-    return HoodieActiveTimeline.createNewInstantTime(true, timeGenerator);
+    return TimelineUtils.generateInstantTime(true, timeGenerator);
   }
 
   /**
@@ -213,7 +202,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
    * @param shouldLock Whether to lock the context to get the instant time.
    */
   public String createNewInstantTime(boolean shouldLock) {
-    return HoodieActiveTimeline.createNewInstantTime(shouldLock, timeGenerator);
+    return TimelineUtils.generateInstantTime(shouldLock, timeGenerator);
   }
 
   public Option<EmbeddedTimelineService> getTimelineServer() {
@@ -238,7 +227,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
     Timer.Context conflictResolutionTimer = metrics.getConflictResolutionCtx();
     try {
       TransactionUtils.resolveWriteConflictIfAny(table, this.txnManager.getCurrentTransactionOwner(),
-          Option.of(metadata), config, txnManager.getLastCompletedTransactionOwner(), false, pendingInflightAndRequestedInstants);
+          Option.of(metadata), config, txnManager.getLastCompletedTransactionOwner(), true, pendingInflightAndRequestedInstants);
       metrics.emitConflictResolutionSuccessful();
     } catch (HoodieWriteConflictException e) {
       metrics.emitConflictResolutionFailed();
@@ -279,14 +268,13 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
    * @param table         {@link HoodieTable} of interest.
    * @param instantTime   instant time of the commit.
    * @param metadata      instance of {@link HoodieCommitMetadata}.
-   * @param writeStatuses Write statuses of the commit
    */
-  protected void writeTableMetadata(HoodieTable table, String instantTime, HoodieCommitMetadata metadata, HoodieData<WriteStatus> writeStatuses) {
+  protected void writeTableMetadata(HoodieTable table, String instantTime, HoodieCommitMetadata metadata) {
     context.setJobStatus(this.getClass().getSimpleName(), "Committing to metadata table: " + config.getTableName());
     Option<HoodieTableMetadataWriter> metadataWriterOpt = table.getMetadataWriter(instantTime);
     if (metadataWriterOpt.isPresent()) {
       try (HoodieTableMetadataWriter metadataWriter = metadataWriterOpt.get()) {
-        metadataWriter.updateFromWriteStatuses(metadata, writeStatuses, instantTime);
+        metadataWriter.update(metadata, instantTime);
       } catch (Exception e) {
         if (e instanceof HoodieException) {
           throw (HoodieException) e;
@@ -296,4 +284,12 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
       }
     }
   }
+
+  /**
+   * Updates the cols being indexed with column stats. This is for tracking purpose so that queries can leverage col stats
+   * from MDT only for indexed columns.
+   * @param metaClient instance of {@link HoodieTableMetaClient} of interest.
+   * @param columnsToIndex list of columns to index.
+   */
+  protected abstract void updateColumnsToIndexWithColStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex);
 }

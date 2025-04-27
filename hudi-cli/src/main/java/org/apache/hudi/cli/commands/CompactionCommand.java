@@ -33,10 +33,9 @@ import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieArchivedTimeline;
-import org.apache.hudi.common.table.timeline.HoodieDefaultTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
@@ -70,6 +69,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.hudi.cli.utils.CommitUtil.getTimeDaysAgo;
+import static org.apache.hudi.util.JavaScalaConverters.convertJavaPropertiesToScalaMap;
 
 /**
  * CLI command to display compaction related options.
@@ -123,9 +123,9 @@ public class CompactionCommand {
       throws Exception {
     HoodieTableMetaClient client = checkAndGetMetaClient();
     HoodieActiveTimeline activeTimeline = client.getActiveTimeline();
-    HoodieCompactionPlan compactionPlan = TimelineMetadataUtils.deserializeCompactionPlan(
-        activeTimeline.readCompactionPlanAsBytes(
-            HoodieTimeline.getCompactionRequestedInstant(compactionInstantTime)).get());
+    InstantGenerator instantGenerator = client.getInstantGenerator();
+    HoodieCompactionPlan compactionPlan =
+        activeTimeline.readCompactionPlan(instantGenerator.getCompactionRequestedInstant(compactionInstantTime));
 
     return printCompaction(compactionPlan, sortByField, descending, limit, headerOnly, partition);
   }
@@ -174,12 +174,11 @@ public class CompactionCommand {
       throws Exception {
     HoodieTableMetaClient client = checkAndGetMetaClient();
     HoodieArchivedTimeline archivedTimeline = client.getArchivedTimeline();
-    HoodieInstant instant = new HoodieInstant(HoodieInstant.State.COMPLETED,
+    HoodieInstant instant = client.createNewInstant(HoodieInstant.State.COMPLETED,
         HoodieTimeline.COMPACTION_ACTION, compactionInstantTime);
     try {
       archivedTimeline.loadCompactionDetailsInMemory(compactionInstantTime);
-      HoodieCompactionPlan compactionPlan =
-              TimelineMetadataUtils.deserializeCompactionPlan(archivedTimeline.getInstantDetails(instant).get());
+      HoodieCompactionPlan compactionPlan = archivedTimeline.readCompactionPlan(instant);
       return printCompaction(compactionPlan, sortByField, descending, limit, headerOnly, partition);
     } finally {
       archivedTimeline.clearInstantDetailsFromMemory(compactionInstantTime);
@@ -204,10 +203,9 @@ public class CompactionCommand {
     String compactionInstantTime = client.createNewInstantTime();
 
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-    String cmd = SparkCommand.COMPACT_SCHEDULE.toString();
-    sparkLauncher.addAppArgs(cmd, master, sparkMemory, HoodieCLI.basePath,
+    SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_SCHEDULE, master, sparkMemory, HoodieCLI.basePath,
         client.getTableConfig().getTableName(), compactionInstantTime, propsFilePath);
     UtilHelpers.validateAndAddProperties(configs, sparkLauncher);
     Process process = sparkLauncher.launch();
@@ -246,16 +244,16 @@ public class CompactionCommand {
       Option<String> firstPendingInstant =
           client.reloadActiveTimeline().filterCompletedAndCompactionInstants()
               .filter(instant -> instant.getAction().equals(HoodieTimeline.COMPACTION_ACTION)).firstInstant()
-              .map(HoodieInstant::getTimestamp);
+              .map(HoodieInstant::requestedTime);
       if (!firstPendingInstant.isPresent()) {
         return "NO PENDING COMPACTION TO RUN";
       }
       compactionInstantTime = firstPendingInstant.get();
     }
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-    sparkLauncher.addAppArgs(SparkCommand.COMPACT_RUN.toString(), master, sparkMemory, HoodieCLI.basePath,
+    SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_RUN, master, sparkMemory, HoodieCLI.basePath,
         client.getTableConfig().getTableName(), compactionInstantTime, parallelism, schemaFilePath,
         retry, propsFilePath);
     UtilHelpers.validateAndAddProperties(configs, sparkLauncher);
@@ -288,9 +286,9 @@ public class CompactionCommand {
     boolean initialized = HoodieCLI.initConf();
     HoodieCLI.initFS(initialized);
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-    sparkLauncher.addAppArgs(SparkCommand.COMPACT_SCHEDULE_AND_EXECUTE.toString(), master, sparkMemory, HoodieCLI.basePath,
+    SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_SCHEDULE_AND_EXECUTE, master, sparkMemory, HoodieCLI.basePath,
         client.getTableConfig().getTableName(), parallelism, schemaFilePath,
         retry, propsFilePath);
     UtilHelpers.validateAndAddProperties(configs, sparkLauncher);
@@ -306,7 +304,7 @@ public class CompactionCommand {
   /**
    * Prints all compaction details.
    */
-  private static String printAllCompactions(HoodieDefaultTimeline timeline,
+  private static String printAllCompactions(HoodieTimeline timeline,
                                             Function<HoodieInstant, HoodieCompactionPlan> compactionPlanReader,
                                             boolean includeExtraMetadata,
                                             String sortByField,
@@ -321,25 +319,25 @@ public class CompactionCommand {
         .collect(Collectors.toList());
 
     Set<String> committedInstants = timeline.getCommitAndReplaceTimeline().filterCompletedInstants()
-        .getInstantsAsStream().map(HoodieInstant::getTimestamp).collect(Collectors.toSet());
+        .getInstantsAsStream().map(HoodieInstant::requestedTime).collect(Collectors.toSet());
 
     List<Comparable[]> rows = new ArrayList<>();
     for (Pair<HoodieInstant, HoodieCompactionPlan> compactionPlan : compactionPlans) {
       HoodieCompactionPlan plan = compactionPlan.getRight();
       HoodieInstant instant = compactionPlan.getLeft();
       final HoodieInstant.State state;
-      if (committedInstants.contains(instant.getTimestamp())) {
+      if (committedInstants.contains(instant.requestedTime())) {
         state = HoodieInstant.State.COMPLETED;
       } else {
         state = instant.getState();
       }
 
       if (includeExtraMetadata) {
-        rows.add(new Comparable[] {instant.getTimestamp(), state.toString(),
+        rows.add(new Comparable[] {instant.requestedTime(), state.toString(),
             plan.getOperations() == null ? 0 : plan.getOperations().size(),
             plan.getExtraMetadata().toString()});
       } else {
-        rows.add(new Comparable[] {instant.getTimestamp(), state.toString(),
+        rows.add(new Comparable[] {instant.requestedTime(), state.toString(),
             plan.getOperations() == null ? 0 : plan.getOperations().size()});
       }
     }
@@ -360,7 +358,7 @@ public class CompactionCommand {
    * We can make these read methods part of HoodieDefaultTimeline and override where necessary. But the
    * BiFunction below has 'hacky' exception blocks, so restricting it to CLI.
    */
-  private <T extends HoodieDefaultTimeline, U extends HoodieInstant, V extends HoodieCompactionPlan>
+  private <T extends HoodieTimeline, U extends HoodieInstant, V extends HoodieCompactionPlan>
       Function<HoodieInstant, HoodieCompactionPlan> compactionPlanReader(
       BiFunction<T, HoodieInstant, HoodieCompactionPlan> f, T timeline) {
 
@@ -370,7 +368,7 @@ public class CompactionCommand {
   private HoodieCompactionPlan readCompactionPlanForArchivedTimeline(HoodieArchivedTimeline archivedTimeline,
                                                                      HoodieInstant instant) {
     try {
-      return TimelineMetadataUtils.deserializeCompactionPlan(archivedTimeline.getInstantDetails(instant).get());
+      return archivedTimeline.readCompactionPlan(instant);
     } catch (Exception e) {
       throw new HoodieException(e.getMessage(), e);
     }
@@ -381,20 +379,20 @@ public class CompactionCommand {
    */
   private HoodieCompactionPlan readCompactionPlanForActiveTimeline(HoodieActiveTimeline activeTimeline,
                                                                    HoodieInstant instant) {
+    InstantGenerator instantGenerator = HoodieCLI.getTableMetaClient().getInstantGenerator();
     try {
       if (!HoodieTimeline.COMPACTION_ACTION.equals(instant.getAction())) {
         try {
           // This could be a completed compaction. Assume a compaction request file is present but skip if fails
-          return TimelineMetadataUtils.deserializeCompactionPlan(
-              activeTimeline.readCompactionPlanAsBytes(
-                  HoodieTimeline.getCompactionRequestedInstant(instant.getTimestamp())).get());
+          return activeTimeline.readCompactionPlan(
+              instantGenerator.getCompactionRequestedInstant(instant.requestedTime()));
         } catch (HoodieIOException ioe) {
           // SKIP
           return null;
         }
       } else {
-        return TimelineMetadataUtils.deserializeCompactionPlan(activeTimeline.readCompactionPlanAsBytes(
-            HoodieTimeline.getCompactionRequestedInstant(instant.getTimestamp())).get());
+        return activeTimeline.readCompactionPlan(
+            instantGenerator.getCompactionRequestedInstant(instant.requestedTime()));
       }
     } catch (IOException e) {
       throw new HoodieIOException(e.getMessage(), e);
@@ -429,7 +427,7 @@ public class CompactionCommand {
   }
 
   private static String getTmpSerializerFile() {
-    return TMP_DIR + UUID.randomUUID().toString() + ".ser";
+    return TMP_DIR + UUID.randomUUID() + ".ser";
   }
 
   private <T> T deSerializeOperationResult(StoragePath inputPath,
@@ -466,9 +464,9 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-      sparkLauncher.addAppArgs(SparkCommand.COMPACT_VALIDATE.toString(), master, sparkMemory, HoodieCLI.basePath,
+      SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_VALIDATE, master, sparkMemory, HoodieCLI.basePath,
           compactionInstant, outputPathStr, parallelism);
       Process process = sparkLauncher.launch();
       InputStreamConsumer.captureOutput(process);
@@ -530,9 +528,9 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-      sparkLauncher.addAppArgs(SparkCommand.COMPACT_UNSCHEDULE_PLAN.toString(), master, sparkMemory, HoodieCLI.basePath,
+      SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_UNSCHEDULE_PLAN, master, sparkMemory, HoodieCLI.basePath,
           compactionInstant, outputPathStr, parallelism, Boolean.valueOf(skipV).toString(),
           Boolean.valueOf(dryRun).toString());
       Process process = sparkLauncher.launch();
@@ -574,9 +572,9 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-      sparkLauncher.addAppArgs(SparkCommand.COMPACT_UNSCHEDULE_FILE.toString(), master, sparkMemory, HoodieCLI.basePath,
+      SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_UNSCHEDULE_FILE, master, sparkMemory, HoodieCLI.basePath,
           fileId, partitionPath, outputPathStr, "1", Boolean.valueOf(skipV).toString(),
           Boolean.valueOf(dryRun).toString());
       Process process = sparkLauncher.launch();
@@ -619,9 +617,9 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
-      sparkLauncher.addAppArgs(SparkCommand.COMPACT_REPAIR.toString(), master, sparkMemory, HoodieCLI.basePath,
+      SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_REPAIR, master, sparkMemory, HoodieCLI.basePath,
           compactionInstant, outputPathStr, parallelism, Boolean.valueOf(dryRun).toString());
       Process process = sparkLauncher.launch();
       InputStreamConsumer.captureOutput(process);

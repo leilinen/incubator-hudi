@@ -19,12 +19,12 @@
 
 package org.apache.spark.sql.execution.datasources
 
+import org.apache.hudi.{HoodieBaseRelation, HoodiePartitionFileSliceMapping, HoodieTableSchema, HoodieTableState, LogFileIterator, MergeOnReadSnapshotRelation, RecordMergingFileIterator, SparkAdapterSupport}
 import org.apache.hudi.DataSourceReadOptions.{REALTIME_PAYLOAD_COMBINE_OPT_VAL, REALTIME_SKIP_MERGE_OPT_VAL}
 import org.apache.hudi.MergeOnReadSnapshotRelation.createPartitionedFile
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.{FileSlice, HoodieLogFile}
 import org.apache.hudi.storage.StoragePath
-import org.apache.hudi.{HoodieBaseRelation, HoodiePartitionFileSliceMapping, HoodieTableSchema, HoodieTableState, LogFileIterator, MergeOnReadSnapshotRelation, RecordMergingFileIterator, SparkAdapterSupport}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
@@ -53,7 +53,8 @@ class HoodieMultipleBaseFileFormat(tableState: Broadcast[HoodieTableState],
                                    mandatoryFields: Seq[String],
                                    isMOR: Boolean,
                                    isIncremental: Boolean,
-                                   requiredFilters: Seq[Filter]) extends FileFormat with SparkAdapterSupport {
+                                   requiredFilters: Seq[Filter]
+                                  ) extends FileFormat with SparkAdapterSupport with Serializable {
   private val parquetFormat = new ParquetFileFormat()
   private val orcFormat = new OrcFileFormat()
 

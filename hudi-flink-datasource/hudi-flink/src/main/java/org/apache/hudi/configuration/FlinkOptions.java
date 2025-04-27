@@ -24,6 +24,7 @@ import org.apache.hudi.common.config.ConfigClassProperty;
 import org.apache.hudi.common.config.ConfigGroups;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.config.HoodieReaderConfig;
 import org.apache.hudi.common.model.EventTimeAvroPayload;
 import org.apache.hudi.common.model.HoodieAvroRecordMerger;
 import org.apache.hudi.common.model.HoodieCleaningPolicy;
@@ -132,17 +133,26 @@ public class FlinkOptions extends HoodieConfig {
       .key("record.merger.impls")
       .stringType()
       .defaultValue(HoodieAvroRecordMerger.class.getName())
-      .withFallbackKeys(HoodieWriteConfig.RECORD_MERGER_IMPLS.key())
+      .withFallbackKeys(HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES.key())
       .withDescription("List of HoodieMerger implementations constituting Hudi's merging strategy -- based on the engine used. "
           + "These merger impls will filter by record.merger.strategy. "
           + "Hudi will pick most efficient implementation to perform merging/combining of the records (during update, reading MOR table, etc)");
 
   @AdvancedConfig
-  public static final ConfigOption<String> RECORD_MERGER_STRATEGY = ConfigOptions
+  public static final ConfigOption<String> RECORD_MERGE_MODE = ConfigOptions
+      .key(HoodieWriteConfig.RECORD_MERGE_MODE.key())
+      .stringType()
+      .noDefaultValue()
+      .withDescription("Using EVENT_TIME_ORDERING to merge records by ordering value,"
+          + "using COMMIT_TIME_ORDERING to merge records by commit time,"
+          + "and using CUSTOM to merge records by the user specified logic.");
+
+  @AdvancedConfig
+  public static final ConfigOption<String> RECORD_MERGER_STRATEGY_ID = ConfigOptions
       .key("record.merger.strategy")
       .stringType()
-      .defaultValue(HoodieRecordMerger.DEFAULT_MERGER_STRATEGY_UUID)
-      .withFallbackKeys(HoodieWriteConfig.RECORD_MERGER_STRATEGY.key())
+      .defaultValue(HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID)
+      .withFallbackKeys(HoodieWriteConfig.RECORD_MERGE_STRATEGY_ID.key())
       .withDescription("Id of merger strategy. Hudi will pick HoodieRecordMerger implementations in record.merger.impls which has the same merger strategy id");
 
   @AdvancedConfig
@@ -279,17 +289,14 @@ public class FlinkOptions extends HoodieConfig {
           + "3) Read Optimized mode (obtain latest view, based on columnar data)\n."
           + "Default: snapshot");
 
-  public static final String REALTIME_SKIP_MERGE = "skip_merge";
-  public static final String REALTIME_PAYLOAD_COMBINE = "payload_combine";
+  public static final String REALTIME_SKIP_MERGE = HoodieReaderConfig.REALTIME_SKIP_MERGE;
+  public static final String REALTIME_PAYLOAD_COMBINE = HoodieReaderConfig.REALTIME_PAYLOAD_COMBINE;
   @AdvancedConfig
   public static final ConfigOption<String> MERGE_TYPE = ConfigOptions
-      .key("hoodie.datasource.merge.type")
+      .key(HoodieReaderConfig.MERGE_TYPE.key())
       .stringType()
-      .defaultValue(REALTIME_PAYLOAD_COMBINE)
-      .withDescription("For Snapshot query on merge on read table. Use this key to define how the payloads are merged, in\n"
-          + "1) skip_merge: read the base file records plus the log file records;\n"
-          + "2) payload_combine: read the base file records first, for each record in base file, checks whether the key is in the\n"
-          + "   log file records(combines the two records with same key for base and log file records), then read the left log file records");
+      .defaultValue(HoodieReaderConfig.MERGE_TYPE.defaultValue())
+      .withDescription(HoodieReaderConfig.MERGE_TYPE.doc());
 
   @AdvancedConfig
   public static final ConfigOption<Boolean> READ_UTC_TIMEZONE = ConfigOptions
@@ -362,6 +369,17 @@ public class FlinkOptions extends HoodieConfig {
           + "default no limit");
 
   @AdvancedConfig
+  public static final ConfigOption<Boolean> READ_CDC_FROM_CHANGELOG = ConfigOptions
+      .key("read.cdc.from.changelog")
+      .booleanType()
+      .defaultValue(true)
+      .withDescription("Whether to consume the delta changes only from the cdc changelog files.\n"
+          + "When CDC is enabled, i). for COW table, the changelog is generated on each file update;\n"
+          + "ii). for MOR table, the changelog is generated on compaction.\n"
+          + "By default, always read from the changelog file,\n"
+          + "once it is disabled, the reader would infer the changes based on the file slice dependencies.");
+
+  @AdvancedConfig
   public static final ConfigOption<Boolean> READ_DATA_SKIPPING_ENABLED = ConfigOptions
       .key("read.data.skipping.enabled")
       .booleanType()
@@ -372,6 +390,13 @@ public class FlinkOptions extends HoodieConfig {
   // ------------------------------------------------------------------------
   //  Write Options
   // ------------------------------------------------------------------------
+
+  @AdvancedConfig
+  public static final ConfigOption<Boolean> INSERT_ROWDATA_MODE_ENABLED = ConfigOptions
+      .key("write.rowdata.mode.enabled")
+      .booleanType()
+      .defaultValue(true)
+      .withDescription("Whether to enable writing RowData directly without converting to Avro.");
 
   @AdvancedConfig
   public static final ConfigOption<Boolean> INSERT_CLUSTER = ConfigOptions
@@ -387,6 +412,13 @@ public class FlinkOptions extends HoodieConfig {
       .stringType()
       .defaultValue(WriteOperationType.UPSERT.value())
       .withDescription("The write operation, that this write should do");
+
+  @AdvancedConfig
+  public static final ConfigOption<Integer> WRITE_TABLE_VERSION = ConfigOptions
+      .key(HoodieWriteConfig.WRITE_TABLE_VERSION.key())
+      .intType()
+      .defaultValue(HoodieWriteConfig.WRITE_TABLE_VERSION.defaultValue())
+      .withDescription("Table version produced by this writer.");
 
   /**
    * Flag to indicate whether to drop duplicates before insert/upsert.
@@ -458,6 +490,21 @@ public class FlinkOptions extends HoodieConfig {
       .defaultValue(4) // default 4 buckets per partition
       .withDescription("Hudi bucket number per partition. Only affected if using Hudi bucket index.");
 
+  @AdvancedConfig
+  public static final ConfigOption<String> BUCKET_INDEX_PARTITION_RULE = ConfigOptions
+      .key(HoodieIndexConfig.BUCKET_INDEX_PARTITION_RULE_TYPE.key())
+      .stringType()
+      .defaultValue(HoodieIndexConfig.BUCKET_INDEX_PARTITION_RULE_TYPE.defaultValue())
+      .withDescription("Rule parser for expressions when using partition level bucket index, default regex.");
+
+  @AdvancedConfig
+  public static final ConfigOption<String> BUCKET_INDEX_PARTITION_EXPRESSIONS = ConfigOptions
+      .key(HoodieIndexConfig.BUCKET_INDEX_PARTITION_EXPRESSIONS.key())
+      .stringType()
+      .noDefaultValue()
+      .withDescription("Users can use this parameter to specify expression and the corresponding bucket "
+          + "numbers (separated by commas).Multiple rules are separated by semicolons like "
+          + "hoodie.bucket.index.partition.expressions=expression1,bucket-number1;expression2,bucket-number2");
   public static final ConfigOption<String> PARTITION_PATH_FIELD = ConfigOptions
       .key(KeyGeneratorOptions.PARTITIONPATH_FIELD_NAME.key())
       .stringType()
@@ -603,6 +650,13 @@ public class FlinkOptions extends HoodieConfig {
       .intType()
       .defaultValue(100) // default 100 MB
       .withDescription("Max memory in MB for merge, default 100MB");
+
+  @AdvancedConfig
+  public static final ConfigOption<Integer> WRITE_MEMORY_SEGMENT_PAGE_SIZE = ConfigOptions
+      .key("write.memory.segment.page.size")
+      .intType()
+      .defaultValue(32 * 1024) // default 32 KB
+      .withDescription("Page size for memory segment used for write buffer.");
 
   // this is only for internal use
   @AdvancedConfig

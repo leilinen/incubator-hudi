@@ -17,10 +17,10 @@
 
 package org.apache.spark.sql.hudi.command.procedures
 
-import org.apache.hudi.avro.model.HoodieRollbackMetadata
+import org.apache.hudi.common.table.HoodieTableMetaClient
+import org.apache.hudi.common.table.timeline.HoodieActiveTimeline
 import org.apache.hudi.common.table.timeline.HoodieInstant.State
 import org.apache.hudi.common.table.timeline.HoodieTimeline.ROLLBACK_ACTION
-import org.apache.hudi.common.table.timeline.{HoodieActiveTimeline, HoodieInstant, TimelineMetadataUtils}
 import org.apache.hudi.exception.HoodieException
 
 import org.apache.spark.sql.Row
@@ -75,7 +75,7 @@ class ShowRollbacksProcedure(showDetails: Boolean) extends BaseProcedure with Pr
     val activeTimeline = metaClient.getActiveTimeline
     if (showDetails) {
       val instantTime = getArgValueOrDefault(args, parameters(2)).get.asInstanceOf[String]
-      getRollbackDetail(activeTimeline, instantTime, limit)
+      getRollbackDetail(metaClient, activeTimeline, instantTime, limit)
     } else {
       getRollbacks(activeTimeline, limit)
     }
@@ -83,12 +83,14 @@ class ShowRollbacksProcedure(showDetails: Boolean) extends BaseProcedure with Pr
 
   override def build: Procedure = new ShowRollbacksProcedure(showDetails)
 
-  def getRollbackDetail(activeTimeline: HoodieActiveTimeline,
+  def getRollbackDetail(metaClient: HoodieTableMetaClient,
+                        activeTimeline: HoodieActiveTimeline,
                         instantTime: String,
                         limit: Int): Seq[Row] = {
     val rows = new util.ArrayList[Row]
-    val metadata = TimelineMetadataUtils.deserializeAvroMetadata(activeTimeline.getInstantDetails(
-      new HoodieInstant(State.COMPLETED, ROLLBACK_ACTION, instantTime)).get, classOf[HoodieRollbackMetadata])
+    val instantGenerator = metaClient.getTimelineLayout.getInstantGenerator
+    val metadata = activeTimeline.readRollbackMetadata(
+      instantGenerator.createNewInstant(State.COMPLETED, ROLLBACK_ACTION, instantTime))
 
     metadata.getPartitionMetadata.asScala.toMap.iterator.foreach(entry => Stream
       .concat(entry._2.getSuccessDeleteFiles.asScala.map(f => (f, true)),
@@ -107,8 +109,7 @@ class ShowRollbacksProcedure(showDetails: Boolean) extends BaseProcedure with Pr
 
     rollback.getInstants.iterator().asScala.foreach(instant => {
       try {
-        val metadata = TimelineMetadataUtils.deserializeAvroMetadata(activeTimeline.getInstantDetails(instant).get,
-          classOf[HoodieRollbackMetadata])
+        val metadata = activeTimeline.readRollbackMetadata(instant)
 
         metadata.getCommitsRollback.iterator().asScala.foreach(c => {
           rows.add(Row(metadata.getStartRollbackTime, c,
@@ -117,7 +118,7 @@ class ShowRollbacksProcedure(showDetails: Boolean) extends BaseProcedure with Pr
         })
       } catch {
         case e: IOException =>
-          throw new HoodieException(s"Failed to get rollback's info from instant ${instant.getTimestamp}.")
+          throw new HoodieException(s"Failed to get rollback's info from instant ${instant.requestedTime}.")
       }
     })
     rows.stream().limit(limit).toArray().map(r => r.asInstanceOf[Row]).toList

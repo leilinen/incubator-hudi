@@ -66,7 +66,7 @@ public class HoodieWriteClientExample {
 
   private static final Logger LOG = LoggerFactory.getLogger(HoodieWriteClientExample.class);
 
-  private static String tableType = HoodieTableType.COPY_ON_WRITE.name();
+  private static final String TABLE_TYPE = HoodieTableType.COPY_ON_WRITE.name();
 
   public static void main(String[] args) throws Exception {
     if (args.length < 2) {
@@ -86,8 +86,8 @@ public class HoodieWriteClientExample {
       Path path = new Path(tablePath);
       FileSystem fs = HadoopFSUtils.getFs(tablePath, jsc.hadoopConfiguration());
       if (!fs.exists(path)) {
-        HoodieTableMetaClient.withPropertyBuilder()
-            .setTableType(tableType)
+        HoodieTableMetaClient.newTableBuilder()
+            .setTableType(TABLE_TYPE)
             .setTableName(tableName)
             .setPayloadClass(HoodieAvroPayload.class)
             .initTable(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()), tablePath);
@@ -139,7 +139,7 @@ public class HoodieWriteClientExample {
         client.deletePartitions(deleteList, newCommitTime);
 
         // compaction
-        if (HoodieTableType.valueOf(tableType) == HoodieTableType.MERGE_ON_READ) {
+        if (HoodieTableType.valueOf(TABLE_TYPE) == HoodieTableType.MERGE_ON_READ) {
           Option<String> instant = client.scheduleCompaction(Option.empty());
           HoodieWriteMetadata<JavaRDD<WriteStatus>> compactionMetadata = client.compact(instant.get());
           client.commitCompaction(instant.get(), compactionMetadata.getCommitMetadata().get(), Option.empty());

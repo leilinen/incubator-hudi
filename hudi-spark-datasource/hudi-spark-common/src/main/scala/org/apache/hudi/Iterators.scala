@@ -22,21 +22,23 @@ import org.apache.hudi.HoodieBaseRelation.BaseFileReader
 import org.apache.hudi.HoodieConversionUtils.{toJavaOption, toScalaOption}
 import org.apache.hudi.HoodieDataSourceHelper.AvroDeserializerSupport
 import org.apache.hudi.LogFileIterator.{getPartitionPath, scanLog}
+import org.apache.hudi.avro.AvroSchemaCache
 import org.apache.hudi.common.config.{HoodieCommonConfig, HoodieMemoryConfig, HoodieMetadataConfig, TypedProperties}
 import org.apache.hudi.common.engine.{EngineType, HoodieLocalEngineContext}
 import org.apache.hudi.common.fs.FSUtils.getRelativePartitionPath
-import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType
 import org.apache.hudi.common.model.{HoodieAvroIndexedRecord, HoodieEmptyRecord, HoodieLogFile, HoodieOperation, HoodieRecord, HoodieSparkRecord}
+import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner
 import org.apache.hudi.common.util.{FileIOUtils, HoodieRecordUtils}
 import org.apache.hudi.config.HoodiePayloadConfig
 import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils.getMaxCompactionMemoryInBytes
 import org.apache.hudi.internal.schema.InternalSchema
-import org.apache.hudi.metadata.HoodieTableMetadata.getDataTableBasePathFromMetadataTable
 import org.apache.hudi.metadata.{HoodieBackedTableMetadata, HoodieTableMetadata}
+import org.apache.hudi.metadata.HoodieTableMetadata.getDataTableBasePathFromMetadataTable
 import org.apache.hudi.storage.{HoodieStorageUtils, StoragePath}
 import org.apache.hudi.util.CachingIterator
+
 import org.apache.avro.Schema
 import org.apache.avro.generic.GenericRecord
 import org.apache.hadoop.conf.Configuration
@@ -48,6 +50,7 @@ import org.apache.spark.sql.catalyst.expressions.Projection
 import org.apache.spark.sql.types.StructType
 
 import java.io.Closeable
+
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -95,7 +98,7 @@ class LogFileIterator(logFiles: List[HoodieLogFile],
   protected override val avroSchema: Schema = requiredAvroSchema
   protected override val structTypeSchema: StructType = requiredStructTypeSchema
 
-  protected val logFileReaderAvroSchema: Schema = new Schema.Parser().parse(tableSchema.avroSchemaStr)
+  protected val logFileReaderAvroSchema: Schema = AvroSchemaCache.intern(new Schema.Parser().parse(tableSchema.avroSchemaStr))
   protected val logFileReaderStructType: StructType = tableSchema.structTypeSchema
 
   private val requiredSchemaAvroProjection: AvroProjection = AvroProjection.create(avroSchema)
@@ -253,7 +256,7 @@ class RecordMergingFileIterator(logFiles: List[HoodieLogFile],
   //        - Projected schema
   //       As such, no particular schema could be assumed, and therefore we rely on the caller
   //       to correspondingly set the schema of the expected output of base-file reader
-  private val baseFileReaderAvroSchema = sparkAdapter.getAvroSchemaConverters.toAvroType(readerSchema, nullable = false, "record")
+  private val baseFileReaderAvroSchema = AvroSchemaCache.intern(sparkAdapter.getAvroSchemaConverters.toAvroType(readerSchema, nullable = false, "record"))
 
   private val serializer = sparkAdapter.createAvroSerializer(readerSchema, baseFileReaderAvroSchema, nullable = false)
 
@@ -263,7 +266,7 @@ class RecordMergingFileIterator(logFiles: List[HoodieLogFile],
   private val requiredSchemaAvroProjection = AvroProjection.create(avroSchema)
 
   private val recordMerger = HoodieRecordUtils.createRecordMerger(tableState.tablePath, EngineType.SPARK,
-    tableState.recordMergerImpls.asJava, tableState.recordMergerStrategy)
+    tableState.recordMergeImplClasses.asJava, tableState.recordMergeStrategyId)
 
   override def doHasNext: Boolean = hasNextInternal
 
@@ -365,7 +368,7 @@ object LogFileIterator extends SparkAdapterSupport {
         new StoragePath(tablePath), partitionPath)
 
       val logRecordReader =
-        metadataTable.getLogRecordScanner(logFiles.asJava, relativePartitionPath, toJavaOption(Some(forceFullScan)))
+        metadataTable.getLogRecordScanner(logFiles.asJava, relativePartitionPath, toJavaOption(Some(forceFullScan)), toJavaOption(Some(tableState.latestCommitTimestamp.get)))
           .getLeft
 
       val recordList = closing(logRecordReader) {
@@ -404,7 +407,7 @@ object LogFileIterator extends SparkAdapterSupport {
       }
 
       logRecordScannerBuilder.withRecordMerger(
-        HoodieRecordUtils.createRecordMerger(tableState.tablePath, EngineType.SPARK, tableState.recordMergerImpls.asJava, tableState.recordMergerStrategy))
+        HoodieRecordUtils.createRecordMerger(tableState.tablePath, EngineType.SPARK, tableState.recordMergeImplClasses.asJava, tableState.recordMergeStrategyId))
 
       val scanner = logRecordScannerBuilder.build()
 

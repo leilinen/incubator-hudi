@@ -18,8 +18,10 @@
 
 package org.apache.hudi.hive;
 
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieSyncTableStrategy;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieException;
@@ -33,6 +35,7 @@ import org.apache.hudi.sync.common.model.PartitionEvent.PartitionEventType;
 import org.apache.hudi.sync.common.util.SparkDataSourceTableUtils;
 
 import com.beust.jcommander.JCommander;
+import com.codahale.metrics.Timer;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.parquet.schema.MessageType;
@@ -41,6 +44,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -49,8 +53,8 @@ import static org.apache.hudi.common.util.StringUtils.nonEmpty;
 import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.getInputFormatClassName;
 import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.getOutputFormatClassName;
 import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.getSerDeClassName;
-import static org.apache.hudi.hive.HiveSyncConfig.RECREATE_HIVE_TABLE_ON_ERROR;
 import static org.apache.hudi.hive.HiveSyncConfig.HIVE_SYNC_FILTER_PUSHDOWN_ENABLED;
+import static org.apache.hudi.hive.HiveSyncConfig.RECREATE_HIVE_TABLE_ON_ERROR;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_AUTO_CREATE_DATABASE;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_IGNORE_EXCEPTIONS;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_SKIP_RO_SUFFIX_FOR_READ_OPTIMIZED_TABLE;
@@ -101,6 +105,10 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
   private String hiveSyncTableStrategy;
 
   public HiveSyncTool(Properties props, Configuration hadoopConf) {
+    this(props, hadoopConf, Option.empty());
+  }
+
+  public HiveSyncTool(Properties props, Configuration hadoopConf, Option<HoodieTableMetaClient> metaClientOption) {
     super(props, hadoopConf);
     String configuredMetastoreUris = props.getProperty(METASTORE_URIS.key());
 
@@ -117,13 +125,14 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
     this.config = new HiveSyncConfig(props, hadoopConfForSync);
     this.databaseName = config.getStringOrDefault(META_SYNC_DATABASE_NAME);
     this.tableName = config.getStringOrDefault(META_SYNC_TABLE_NAME);
-    initSyncClient(config);
+    HoodieTableMetaClient metaClient = metaClientOption.orElseGet(() -> buildMetaClient(config));
+    initSyncClient(config, metaClient);
     initTableNameVars(config);
   }
 
-  protected void initSyncClient(HiveSyncConfig config) {
+  protected void initSyncClient(HiveSyncConfig config, HoodieTableMetaClient metaClient) {
     try {
-      this.syncClient = new HoodieHiveSyncClient(config);
+      this.syncClient = new HoodieHiveSyncClient(config, metaClient);
     } catch (RuntimeException e) {
       if (config.getBoolean(HIVE_IGNORE_EXCEPTIONS)) {
         LOG.error("Got runtime exception when hive syncing, but continuing as ignoreExceptions config is set ", e);
@@ -230,6 +239,13 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
     final boolean tableExists = syncClient.tableExists(tableName);
     // Get the parquet schema for this table looking at the latest commit
     MessageType schema = syncClient.getStorageSchema(!config.getBoolean(HIVE_SYNC_OMIT_METADATA_FIELDS));
+    // if table exists and location of the metastore table doesn't match the hoodie base path, recreate the table
+    if (tableExists && !FSUtils.comparePathsWithoutScheme(syncClient.getBasePath(), syncClient.getTableLocation(tableName))) {
+      LOG.info("basepath is updated for the table {}", tableName);
+      recreateAndSyncHiveTable(tableName, useRealtimeInputFormat, readAsOptimized);
+      return;
+    }
+
     boolean schemaChanged;
     boolean propertiesChanged;
     try {
@@ -249,9 +265,11 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
       }
       LOG.info("Sync complete for {}", tableName);
     } catch (HoodieHiveSyncException ex) {
-      LOG.error("failed to sync the table {}", tableName, ex);
       if (shouldRecreateAndSyncTable()) {
+        LOG.warn("failed to sync the table {}, trying to recreate", tableName, ex);
         recreateAndSyncHiveTable(tableName, useRealtimeInputFormat, readAsOptimized);
+      } else {
+        throw new HoodieHiveSyncException("failed to sync the table " + tableName, ex);
       }
     }
   }
@@ -319,12 +337,18 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
 
   private void recreateAndSyncHiveTable(String tableName, boolean useRealtimeInputFormat, boolean readAsOptimized) {
     LOG.info("recreating and syncing the table {}", tableName);
+    Timer.Context timerContext = metrics.getRecreateAndSyncTimer();
     MessageType schema = syncClient.getStorageSchema(!config.getBoolean(HIVE_SYNC_OMIT_METADATA_FIELDS));
     try {
       createOrReplaceTable(tableName, useRealtimeInputFormat, readAsOptimized, schema);
       syncAllPartitions(tableName);
       syncClient.updateLastCommitTimeSynced(tableName);
+      if (Objects.nonNull(timerContext)) {
+        long durationInNs = timerContext.stop();
+        metrics.updateRecreateAndSyncDurationInMs(durationInNs);
+      }
     } catch (HoodieHiveSyncException ex) {
+      metrics.incrementRecreateAndSyncFailureCounter();
       throw new HoodieHiveSyncException("failed to recreate the table for " + tableName, ex);
     }
   }
@@ -384,10 +408,10 @@ public class HiveSyncTool extends HoodieSyncTool implements AutoCloseable {
         config.getSplitStrings(META_SYNC_PARTITION_FIELDS),
         config.getBooleanOrDefault(HIVE_SUPPORT_TIMESTAMP_TYPE));
     if (schemaDiff.isEmpty()) {
-      LOG.info("No Schema difference for {}\nMessageType: {}", tableName, schema);
+      LOG.info("No Schema difference for {}.", tableName);
     } else {
       LOG.info("Schema difference found for {}. Updated schema: {}", tableName, schema);
-      syncClient.updateTableSchema(tableName, schema);
+      syncClient.updateTableSchema(tableName, schema, schemaDiff);
       schemaChanged = true;
     }
 

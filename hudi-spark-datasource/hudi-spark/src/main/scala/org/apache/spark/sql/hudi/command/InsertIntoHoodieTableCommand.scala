@@ -17,14 +17,17 @@
 
 package org.apache.spark.sql.hudi.command
 
-import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.{HoodieSparkSqlWriter, SparkAdapterSupport}
+import org.apache.hudi.exception.HoodieException
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, HoodieCatalogTable}
 import org.apache.spark.sql.catalyst.expressions.{Alias, Cast, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.command.DataWritingCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils._
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig
@@ -51,16 +54,22 @@ case class InsertIntoHoodieTableCommand(logicalRelation: LogicalRelation,
                                         query: LogicalPlan,
                                         partitionSpec: Map[String, Option[String]],
                                         overwrite: Boolean)
-  extends HoodieLeafRunnableCommand {
+  extends DataWritingCommand {
   override def innerChildren: Seq[QueryPlan[_]] = Seq(query)
 
-  override def run(sparkSession: SparkSession): Seq[Row] = {
+  override def outputColumnNames: Seq[String] = {
+    query.output.map(_.name)
+  }
+
+  override def run(sparkSession: SparkSession, plan: SparkPlan): Seq[Row] = {
     assert(logicalRelation.catalogTable.isDefined, "Missing catalog table")
 
     val table = logicalRelation.catalogTable.get
-    InsertIntoHoodieTableCommand.run(sparkSession, table, query, partitionSpec, overwrite)
+    InsertIntoHoodieTableCommand.run(sparkSession, table, plan, partitionSpec, overwrite)
     Seq.empty[Row]
   }
+
+  override def withNewChildInternal(newChild: LogicalPlan) : LogicalPlan = copy(query = newChild)
 }
 
 object InsertIntoHoodieTableCommand extends Logging with ProvidesHoodieConfig with SparkAdapterSupport {
@@ -81,7 +90,7 @@ object InsertIntoHoodieTableCommand extends Logging with ProvidesHoodieConfig wi
    */
   def run(sparkSession: SparkSession,
           table: CatalogTable,
-          query: LogicalPlan,
+          query: SparkPlan,
           partitionSpec: Map[String, Option[String]],
           overwrite: Boolean,
           refreshTable: Boolean = true,
@@ -95,9 +104,8 @@ object InsertIntoHoodieTableCommand extends Logging with ProvidesHoodieConfig wi
     }
     val config = buildHoodieInsertConfig(catalogTable, sparkSession, isOverWritePartition, isOverWriteTable, partitionSpec, extraOptions, staticOverwritePartitionPathOpt)
 
-    val alignedQuery = alignQueryOutput(query, catalogTable, partitionSpec, sparkSession.sessionState.conf)
-
-    val (success, _, _, _, _, _) = HoodieSparkSqlWriter.write(sparkSession.sqlContext, mode, config, Dataset.ofRows(sparkSession, alignedQuery))
+    val df = sparkSession.internalCreateDataFrame(query.execute(), query.schema)
+    val (success, _, _, _, _, _) = HoodieSparkSqlWriter.write(sparkSession.sqlContext, mode, config, df)
 
     if (!success) {
       throw new HoodieException("Insert Into to Hudi table failed")
@@ -123,7 +131,7 @@ object InsertIntoHoodieTableCommand extends Logging with ProvidesHoodieConfig wi
    * @param partitionsSpec partition spec specifying static/dynamic partition values
    * @param conf Spark's [[SQLConf]]
    */
-  private def alignQueryOutput(query: LogicalPlan,
+  def alignQueryOutput(query: LogicalPlan,
                                catalogTable: HoodieCatalogTable,
                                partitionsSpec: Map[String, Option[String]],
                                conf: SQLConf): LogicalPlan = {

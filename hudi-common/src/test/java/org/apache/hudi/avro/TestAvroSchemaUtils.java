@@ -19,6 +19,7 @@
 package org.apache.hudi.avro;
 
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.exception.HoodieAvroSchemaException;
 import org.apache.hudi.exception.SchemaBackwardsCompatibilityException;
 import org.apache.hudi.exception.SchemaCompatibilityException;
 
@@ -45,6 +46,19 @@ public class TestAvroSchemaUtils {
       + "      \"name\": \"number\",\n"
       + "      \"type\": [\"null\", \"int\"]\n"
       + "    },\n"
+      + "    {\n"
+      + "        \"name\" : \"f1\",\n"
+      + "        \"type\" : [ \"null\", {\n"
+      + "           \"type\" : \"fixed\",\n"
+      + "           \"name\" : \"f1\",\n"
+      + "           \"namespace\" : \"\",\n"
+      + "           \"size\" : 5,\n"
+      + "           \"logicalType\" : \"decimal\",\n"
+      + "           \"precision\" : 10,\n"
+      + "           \"scale\" : 2\n"
+      + "           }],\n"
+      + "       \"default\" : null\n"
+      + "      },\n"
       + "    {\n"
       + "      \"name\": \"nested_record\",\n"
       + "      \"type\": {\n"
@@ -74,6 +88,19 @@ public class TestAvroSchemaUtils {
       + "      \"name\": \"number\",\n"
       + "      \"type\": [\"null\", \"int\"]\n"
       + "    },\n"
+      + "    {\n"
+      + "        \"name\" : \"f1\",\n"
+      + "        \"type\" : [ \"null\", {\n"
+      + "           \"type\" : \"fixed\",\n"
+      + "           \"name\" : \"fixed\",\n"
+      + "           \"namespace\" : \"example.schema.source.f1\",\n"
+      + "           \"size\" : 5,\n"
+      + "           \"logicalType\" : \"decimal\",\n"
+      + "           \"precision\" : 10,\n"
+      + "           \"scale\" : 2\n"
+      + "           }],\n"
+      + "       \"default\" : null\n"
+      + "      },\n"
       + "    {\n"
       + "      \"name\": \"nested_record\",\n"
       + "      \"type\": {\n"
@@ -114,6 +141,46 @@ public class TestAvroSchemaUtils {
       + "    }\n"
       + "  ]\n"
       + "}\n";
+
+  @Test
+  public void testCreateNewSchemaFromFieldsWithReference_NullSchema() {
+    // This test should throw an IllegalArgumentException
+    assertThrows(IllegalArgumentException.class, () -> AvroSchemaUtils.createNewSchemaFromFieldsWithReference(null, Collections.emptyList()));
+  }
+
+  @Test
+  public void testCreateNewSchemaFromFieldsWithReference_NullObjectProps() {
+    // Create a schema without any object properties
+    String schemaStr = "{ \"type\": \"record\", \"name\": \"TestRecord\", \"fields\": [] }";
+    Schema schema = new Schema.Parser().parse(schemaStr);
+
+    // Ensure getObjectProps returns null by mocking or creating a schema without props
+    Schema newSchema = AvroSchemaUtils.createNewSchemaFromFieldsWithReference(schema, Collections.emptyList());
+
+    // Validate the new schema
+    assertEquals("TestRecord", newSchema.getName());
+    assertEquals(0, newSchema.getFields().size());
+  }
+
+  @Test
+  public void testCreateNewSchemaFromFieldsWithReference_WithObjectProps() {
+    // Create a schema with object properties
+    String schemaStr = "{ \"type\": \"record\", \"name\": \"TestRecord\", \"fields\": [], \"prop1\": \"value1\" }";
+    Schema schema = new Schema.Parser().parse(schemaStr);
+
+    // Add an object property to the schema
+    schema.addProp("prop1", "value1");
+
+    // Create new fields to add
+    Schema.Field newField = new Schema.Field("newField", Schema.create(Schema.Type.STRING), null, (Object) null);
+    Schema newSchema = AvroSchemaUtils.createNewSchemaFromFieldsWithReference(schema, Collections.singletonList(newField));
+
+    // Validate the new schema
+    assertEquals("TestRecord", newSchema.getName());
+    assertEquals(1, newSchema.getFields().size());
+    assertEquals("value1", newSchema.getProp("prop1"));
+    assertEquals("newField", newSchema.getFields().get(0).name());
+  }
 
   @Test
   public void testIsStrictProjection() {
@@ -325,5 +392,31 @@ public class TestAvroSchemaUtils {
     Option<Schema.Field> missingField = AvroSchemaUtils.findNestedField(fullSchema, "nested_record.long");
     assertTrue(missingField.isPresent());
     assertEquals(fullSchema, AvroSchemaUtils.appendFieldsToSchemaDedupNested(missingFieldSchema, Collections.singletonList(missingField.get())));
+  }
+
+  @Test
+  public void testFindNestedFieldType() {
+    Schema sourceSchema = new Schema.Parser().parse(SOURCE_SCHEMA);
+    Option<Schema.Type> field = AvroSchemaUtils.findNestedFieldType(sourceSchema, "number");
+    assertTrue(field.isPresent());
+    assertEquals(Schema.Type.INT, field.get());
+
+    field = AvroSchemaUtils.findNestedFieldType(sourceSchema, "nested_record.string");
+    assertTrue(field.isPresent());
+    assertEquals(Schema.Type.STRING, field.get());
+
+    field = AvroSchemaUtils.findNestedFieldType(sourceSchema, "nested_record.long");
+    assertTrue(field.isPresent());
+    assertEquals(Schema.Type.LONG, field.get());
+
+    field = AvroSchemaUtils.findNestedFieldType(sourceSchema, null);
+    assertTrue(field.isEmpty());
+
+    field = AvroSchemaUtils.findNestedFieldType(sourceSchema, "");
+    assertTrue(field.isEmpty());
+
+    assertThrows(HoodieAvroSchemaException.class, () -> AvroSchemaUtils.findNestedFieldType(sourceSchema, "long"));
+    assertThrows(HoodieAvroSchemaException.class, () -> AvroSchemaUtils.findNestedFieldType(sourceSchema, "nested_record.bool"));
+    assertThrows(HoodieAvroSchemaException.class, () -> AvroSchemaUtils.findNestedFieldType(sourceSchema, "non_present_field.also_not_present"));
   }
 }

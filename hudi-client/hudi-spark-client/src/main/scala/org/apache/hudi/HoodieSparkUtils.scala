@@ -28,6 +28,9 @@ import org.apache.hudi.util.ExceptionWrappingIterator
 import org.apache.avro.Schema
 import org.apache.avro.generic.GenericRecord
 import org.apache.hadoop.fs.Path
+import org.apache.hudi.common.config.TimestampKeyGeneratorConfig
+import org.apache.hudi.keygen.TimestampBasedAvroKeyGenerator
+import org.apache.hudi.keygen.constant.KeyGeneratorType
 import org.apache.spark.SPARK_VERSION
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
@@ -46,22 +49,11 @@ import scala.reflect.ClassTag
 private[hudi] trait SparkVersionsSupport {
   def getSparkVersion: String
 
-  def isSpark2: Boolean = getSparkVersion.startsWith("2.")
   def isSpark3: Boolean = getSparkVersion.startsWith("3.")
-  def isSpark3_0: Boolean = getSparkVersion.startsWith("3.0")
-  def isSpark3_1: Boolean = getSparkVersion.startsWith("3.1")
-  def isSpark3_2: Boolean = getSparkVersion.startsWith("3.2")
   def isSpark3_3: Boolean = getSparkVersion.startsWith("3.3")
   def isSpark3_4: Boolean = getSparkVersion.startsWith("3.4")
   def isSpark3_5: Boolean = getSparkVersion.startsWith("3.5")
 
-  def gteqSpark3_0: Boolean = getSparkVersion >= "3.0"
-  def gteqSpark3_1: Boolean = getSparkVersion >= "3.1"
-  def gteqSpark3_1_3: Boolean = getSparkVersion >= "3.1.3"
-  def gteqSpark3_2: Boolean = getSparkVersion >= "3.2"
-  def gteqSpark3_2_1: Boolean = getSparkVersion >= "3.2.1"
-  def gteqSpark3_2_2: Boolean = getSparkVersion >= "3.2.2"
-  def gteqSpark3_3: Boolean = getSparkVersion >= "3.3"
   def gteqSpark3_3_2: Boolean = getSparkVersion >= "3.3.2"
   def gteqSpark3_4: Boolean = getSparkVersion >= "3.4"
   def gteqSpark3_5: Boolean = getSparkVersion >= "3.5"
@@ -237,6 +229,31 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
   }
 
   def parsePartitionColumnValues(partitionColumns: Array[String],
+                                   partitionPath: String,
+                                   tableBasePath: StoragePath,
+                                   tableSchema: StructType,
+                                   tableConfig: java.util.Map[String, String],
+                                   timeZoneId: String,
+                                   sparkParsePartitionUtil: SparkParsePartitionUtil,
+                                   shouldValidatePartitionColumns: Boolean): Array[Object] = {
+    val keyGeneratorClass = KeyGeneratorType.getKeyGeneratorClassName(tableConfig)
+    val timestampKeyGeneratorType = tableConfig.get(TimestampKeyGeneratorConfig.TIMESTAMP_TYPE_FIELD.key())
+
+    if (null != keyGeneratorClass
+      && null != timestampKeyGeneratorType
+      && keyGeneratorClass.equals(KeyGeneratorType.TIMESTAMP.getClassName)
+      && !timestampKeyGeneratorType.matches(TimestampBasedAvroKeyGenerator.TimestampType.DATE_STRING.toString)) {
+      // For TIMESTAMP key generator when TYPE is not DATE_STRING (like SCALAR, UNIX_TIMESTAMP, EPOCHMILLISECONDS, etc.),
+      // we couldn't reconstruct initial partition column values from partition paths due to lost data after formatting.
+      // But the output for these cases is in a string format, so we can pass partitionPath as UTF8String
+      Array.fill(partitionColumns.length)(UTF8String.fromString(partitionPath))
+    } else {
+      doParsePartitionColumnValues(partitionColumns, partitionPath, tableBasePath, tableSchema, timeZoneId,
+        sparkParsePartitionUtil, shouldValidatePartitionColumns)
+    }
+  }
+
+  def doParsePartitionColumnValues(partitionColumns: Array[String],
                                  partitionPath: String,
                                  basePath: StoragePath,
                                  schema: StructType,

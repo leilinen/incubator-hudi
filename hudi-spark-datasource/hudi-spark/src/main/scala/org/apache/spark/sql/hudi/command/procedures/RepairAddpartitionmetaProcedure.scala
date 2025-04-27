@@ -27,6 +27,7 @@ import org.apache.spark.sql.types.{DataTypes, Metadata, StructField, StructType}
 
 import java.util
 import java.util.function.Supplier
+
 import scala.collection.JavaConverters._
 
 class RepairAddpartitionmetaProcedure extends BaseProcedure with ProcedureBuilder with Logging {
@@ -54,7 +55,7 @@ class RepairAddpartitionmetaProcedure extends BaseProcedure with ProcedureBuilde
 
     val metaClient = createMetaClient(jsc, tablePath)
 
-    val latestCommit: String = metaClient.getActiveTimeline.getCommitAndReplaceTimeline.lastInstant.get.getTimestamp
+    val latestCommit: String = metaClient.getActiveTimeline.getCommitAndReplaceTimeline.lastInstant.get.requestedTime
     val partitionPaths: util.List[String] = FSUtils.getAllPartitionFoldersThreeLevelsDown(metaClient.getStorage, tablePath);
     val basePath: StoragePath = new StoragePath(tablePath)
 

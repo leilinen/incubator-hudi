@@ -43,26 +43,30 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import java.util.ArrayList;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 
+import static org.apache.hudi.gcp.bigquery.BigQuerySyncConfig.BIGQUERY_SYNC_BILLING_PROJECT_ID;
+import static org.apache.hudi.gcp.bigquery.BigQuerySyncConfig.BIGQUERY_SYNC_PROJECT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import java.util.Collections;
-
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class TestHoodieBigQuerySyncClient {
   private static final String PROJECT_ID = "test_project";
+  private static final String BILLING_PROJECT_ID = "test_billing_project";
   private static final String MANIFEST_FILE_URI = "file:/manifest_file";
   private static final String SOURCE_PREFIX = "file:/manifest_file/date=*";
   private static final String TEST_TABLE = "test_table";
@@ -71,6 +75,7 @@ public class TestHoodieBigQuerySyncClient {
   static @TempDir Path tempDir;
 
   private static String basePath;
+  private static HoodieTableMetaClient metaClient;
   private final BigQuery mockBigQuery = mock(BigQuery.class);
   private HoodieBigQuerySyncClient client;
   private Properties properties;
@@ -78,7 +83,7 @@ public class TestHoodieBigQuerySyncClient {
   @BeforeAll
   static void setupOnce() throws Exception {
     basePath = tempDir.toString();
-    HoodieTableMetaClient.withPropertyBuilder()
+    metaClient = HoodieTableMetaClient.newTableBuilder()
         .setTableType(HoodieTableType.COPY_ON_WRITE)
         .setTableName(TEST_TABLE)
         .setPayloadClass(HoodieAvroPayload.class)
@@ -89,16 +94,42 @@ public class TestHoodieBigQuerySyncClient {
   void setup() {
     properties = new Properties();
     properties.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_PROJECT_ID.key(), PROJECT_ID);
+    properties.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_BILLING_PROJECT_ID.key(), BILLING_PROJECT_ID);
     properties.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_DATASET_NAME.key(), TEST_DATASET);
     properties.setProperty(HoodieSyncConfig.META_SYNC_BASE_PATH.key(), tempDir.toString());
     properties.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_REQUIRE_PARTITION_FILTER.key(), "true");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testCreateOrUpdateTableUsingManifestWithBillingProjectId(boolean setBillingProjectId) {
+    Properties props = new Properties();
+    props.setProperty(BIGQUERY_SYNC_PROJECT_ID.key(), PROJECT_ID);
+    if (setBillingProjectId) {
+      props.setProperty(BIGQUERY_SYNC_BILLING_PROJECT_ID.key(), BILLING_PROJECT_ID);
+    }
+    props.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_DATASET_NAME.key(), TEST_DATASET);
+    props.setProperty(HoodieSyncConfig.META_SYNC_BASE_PATH.key(), tempDir.toString());
+    props.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_REQUIRE_PARTITION_FILTER.key(), "true");
+    BigQuerySyncConfig syncConfig = new BigQuerySyncConfig(props);
+    Job mockJob = mock(Job.class);
+    ArgumentCaptor<JobInfo> jobInfoCaptor = ArgumentCaptor.forClass(JobInfo.class);
+    when(mockBigQuery.create(jobInfoCaptor.capture())).thenReturn(mockJob);
+
+    HoodieBigQuerySyncClient syncClient = new HoodieBigQuerySyncClient(syncConfig, mockBigQuery, metaClient);
+    Schema schema = Schema.of(Field.of("field", StandardSQLTypeName.STRING));
+    syncClient.createOrUpdateTableUsingBqManifestFile(TEST_TABLE, MANIFEST_FILE_URI, SOURCE_PREFIX, schema);
+
+    assertEquals(
+        setBillingProjectId ? BILLING_PROJECT_ID : PROJECT_ID,
+        jobInfoCaptor.getValue().getJobId().getProject());
   }
 
   @Test
   void createTableWithManifestFile_partitioned() throws Exception {
     properties.setProperty(BigQuerySyncConfig.BIGQUERY_SYNC_BIG_LAKE_CONNECTION_ID.key(), "my-project.us.bl_connection");
     BigQuerySyncConfig config = new BigQuerySyncConfig(properties);
-    client = new HoodieBigQuerySyncClient(config, mockBigQuery);
+    client = new HoodieBigQuerySyncClient(config, mockBigQuery, metaClient);
 
     Schema schema = Schema.of(Field.of("field", StandardSQLTypeName.STRING));
     ArgumentCaptor<JobInfo> jobInfoCaptor = ArgumentCaptor.forClass(JobInfo.class);
@@ -122,7 +153,7 @@ public class TestHoodieBigQuerySyncClient {
   @Test
   void createTableWithManifestFile_nonPartitioned() throws Exception {
     BigQuerySyncConfig config = new BigQuerySyncConfig(properties);
-    client = new HoodieBigQuerySyncClient(config, mockBigQuery);
+    client = new HoodieBigQuerySyncClient(config, mockBigQuery, metaClient);
 
     Schema schema = Schema.of(Field.of("field", StandardSQLTypeName.STRING));
     ArgumentCaptor<JobInfo> jobInfoCaptor = ArgumentCaptor.forClass(JobInfo.class);
@@ -142,9 +173,9 @@ public class TestHoodieBigQuerySyncClient {
   }
 
   @Test
-  void skipUpdatingSchema_partitioned() throws Exception {
+  void skipUpdatingSchema_partitioned() {
     BigQuerySyncConfig config = new BigQuerySyncConfig(properties);
-    client = new HoodieBigQuerySyncClient(config, mockBigQuery);
+    client = new HoodieBigQuerySyncClient(config, mockBigQuery, metaClient);
     Table mockTable = mock(Table.class);
     ExternalTableDefinition mockTableDefinition = mock(ExternalTableDefinition.class);
     // The table schema has no change: it contains a "field" and a "partition_field".
@@ -171,7 +202,7 @@ public class TestHoodieBigQuerySyncClient {
   @Test
   void testTableNotExistsOrDoesNotMatchSpecification() {
     BigQuerySyncConfig config = new BigQuerySyncConfig(properties);
-    client = new HoodieBigQuerySyncClient(config, mockBigQuery);
+    client = new HoodieBigQuerySyncClient(config, mockBigQuery, metaClient);
     // table does not exist
     assertTrue(client.tableNotExistsOrDoesNotMatchSpecification(TEST_TABLE));
 
@@ -186,6 +217,11 @@ public class TestHoodieBigQuerySyncClient {
     // manifest does not exist
     when(externalTableDefinition.getSourceUris()).thenReturn(Collections.emptyList());
     assertTrue(client.tableNotExistsOrDoesNotMatchSpecification(TEST_TABLE));
+
+    // manifest exists but base path is outdated
+    when(externalTableDefinition.getSourceUris()).thenReturn(Collections.singletonList(
+        basePath + "/.hoodie/" + ManifestFileWriter.ABSOLUTE_PATH_MANIFEST_FOLDER_NAME));
+    assertFalse(client.tableNotExistsOrDoesNotMatchSpecification(TEST_TABLE));
 
     // manifest exists but base path is outdated
     when(externalTableDefinition.getSourceUris()).thenReturn(Collections.singletonList(ManifestFileWriter.ABSOLUTE_PATH_MANIFEST_FOLDER_NAME));

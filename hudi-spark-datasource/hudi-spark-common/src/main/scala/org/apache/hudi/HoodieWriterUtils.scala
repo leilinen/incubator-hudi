@@ -20,20 +20,21 @@ package org.apache.hudi
 import org.apache.hudi.AutoRecordKeyGenerationUtils.shouldAutoGenerateRecordKeys
 import org.apache.hudi.DataSourceOptionsHelper.allAlternatives
 import org.apache.hudi.DataSourceWriteOptions._
-import org.apache.hudi.common.config.HoodieMetadataConfig.ENABLE
 import org.apache.hudi.common.config.{DFSPropertiesConfiguration, HoodieCommonConfig, HoodieConfig, TypedProperties}
-import org.apache.hudi.common.model.{HoodieRecord, WriteOperationType}
-import org.apache.hudi.common.table.HoodieTableConfig
-import org.apache.hudi.config.HoodieWriteConfig.SPARK_SQL_MERGE_INTO_PREPPED_KEY
+import org.apache.hudi.common.config.HoodieMetadataConfig.ENABLE
+import org.apache.hudi.common.model.{DefaultHoodieRecordPayload, HoodieRecord, OverwriteWithLatestAvroPayload, WriteOperationType}
+import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableVersion}
+import org.apache.hudi.common.util.StringUtils.isNullOrEmpty
+import org.apache.hudi.config.HoodieWriteConfig.{RECORD_MERGE_MODE, SPARK_SQL_MERGE_INTO_PREPPED_KEY}
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.hive.HiveSyncConfigHolder
-import org.apache.hudi.keygen.constant.KeyGeneratorType
 import org.apache.hudi.keygen.{NonpartitionedKeyGenerator, SimpleKeyGenerator}
+import org.apache.hudi.keygen.constant.KeyGeneratorType
 import org.apache.hudi.sync.common.HoodieSyncConfig
 import org.apache.hudi.util.SparkKeyGenUtils
 
-import org.apache.spark.sql.hudi.command.{MergeIntoKeyGenerator, SqlKeyGenerator}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
+import org.apache.spark.sql.hudi.command.{MergeIntoKeyGenerator, SqlKeyGenerator}
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -55,7 +56,6 @@ object HoodieWriterUtils {
     hoodieConfig.setDefaultValue(OPERATION)
     hoodieConfig.setDefaultValue(TABLE_TYPE)
     hoodieConfig.setDefaultValue(PRECOMBINE_FIELD)
-    hoodieConfig.setDefaultValue(PAYLOAD_CLASS_NAME)
     hoodieConfig.setDefaultValue(KEYGENERATOR_CLASS_NAME)
     hoodieConfig.setDefaultValue(ENABLE)
     hoodieConfig.setDefaultValue(COMMIT_METADATA_KEYPREFIX)
@@ -153,6 +153,64 @@ object HoodieWriterUtils {
     }
   }
 
+  private final val EXPRESSION_PAYLOAD_CLASS_NAME = "org.apache.spark.sql.hudi.command.payload.ExpressionPayload"
+  private final val VALIDATE_DUPLICATE_KEY_PAYLOAD_CLASS_NAME = "org.apache.spark.sql.hudi.command.ValidateDuplicateKeyPayload"
+
+  /**
+   * Logic to skip validation of configs vs table configs
+   * In nearly all cases we should make sure that the input config matches the table config
+   * But there are a few times where it is allowed to be different
+   */
+  private def shouldIgnoreConfig(key: String, value: String, params: Map[String, String], tableConfig: HoodieConfig): Boolean = {
+    var ignoreConfig = false
+    // Base file format can change between writes, so ignore it.
+    ignoreConfig = ignoreConfig || HoodieTableConfig.BASE_FILE_FORMAT.key.equals(key)
+
+    //expression payload will never be the table config so skip validation of merge configs
+    ignoreConfig = ignoreConfig || (params.getOrElse(PAYLOAD_CLASS_NAME.key(), "").equals(EXPRESSION_PAYLOAD_CLASS_NAME)
+      && (key.equals(PAYLOAD_CLASS_NAME.key()) || key.equals(HoodieTableConfig.PAYLOAD_CLASS_NAME.key())
+      || key.equals(RECORD_MERGE_MODE.key())
+      || key.equals(RECORD_MERGE_STRATEGY_ID.key())))
+
+    ignoreConfig = ignoreConfig || (key.equals(PAYLOAD_CLASS_NAME.key()) && shouldIgnorePayloadValidation(value, params, tableConfig))
+    // If hoodie.database.name is empty, ignore validation.
+    ignoreConfig = ignoreConfig || (key.equals(HoodieTableConfig.DATABASE_NAME.key()) && isNullOrEmpty(getStringFromTableConfigWithAlternatives(tableConfig, key)))
+    ignoreConfig
+  }
+
+  def shouldIgnorePayloadValidation(value: String, params: Map[String, String], tableConfig: HoodieConfig): Boolean = {
+    //don't validate the payload only in the case that insert into is using fallback to some legacy configs
+    val ignoreConfig = value.equals(VALIDATE_DUPLICATE_KEY_PAYLOAD_CLASS_NAME)
+    if (ignoreConfig) {
+       ignoreConfig
+    } else {
+      if (tableConfig == null) {
+        true
+      } else {
+        // In table version 8, if table Config payload refers to DefaultHoodieRecordPayload and if initial table version is 6, payload class config
+        // writer props are allowed to be OverwriteWithLatest
+        val tableVersion = if (tableConfig.contains(HoodieTableConfig.VERSION.key())) {
+          HoodieTableVersion.fromVersionCode(tableConfig.getInt(HoodieTableConfig.VERSION))
+        } else {
+          HoodieTableVersion.current()
+        }
+        val initTableVersion = if (tableConfig.contains(HoodieTableConfig.INITIAL_VERSION.key())) {
+          HoodieTableVersion.fromVersionCode(tableConfig.getInt(HoodieTableConfig.INITIAL_VERSION))
+        } else {
+          HoodieTableVersion.current()
+        }
+
+        if (tableVersion == HoodieTableVersion.EIGHT && initTableVersion.lesserThan(HoodieTableVersion.EIGHT)
+          && value.equals(classOf[OverwriteWithLatestAvroPayload].getName)
+          && tableConfig.getString(HoodieTableConfig.PAYLOAD_CLASS_NAME.key()).equals(classOf[DefaultHoodieRecordPayload].getName)) {
+          true
+        } else {
+          ignoreConfig
+        }
+      }
+    }
+  }
+
   def validateTableConfig(spark: SparkSession, params: Map[String, String],
                           tableConfig: HoodieConfig): Unit = {
     validateTableConfig(spark, params, tableConfig, false)
@@ -168,8 +226,7 @@ object HoodieWriterUtils {
       val resolver = spark.sessionState.conf.resolver
       val diffConfigs = StringBuilder.newBuilder
       params.foreach { case (key, value) =>
-        // Base file format can change between writes, so ignore it.
-        if (!HoodieTableConfig.BASE_FILE_FORMAT.key.equals(key)) {
+        if (!shouldIgnoreConfig(key, value, params, tableConfig)) {
           val existingValue = getStringFromTableConfigWithAlternatives(tableConfig, key)
           if (null != existingValue && !resolver(existingValue, value)) {
             diffConfigs.append(s"$key:\t$value\t${tableConfig.getString(key)}\n")
@@ -180,12 +237,14 @@ object HoodieWriterUtils {
       if (null != tableConfig) {
         val datasourceRecordKey = params.getOrElse(RECORDKEY_FIELD.key(), null)
         val tableConfigRecordKey = tableConfig.getString(HoodieTableConfig.RECORDKEY_FIELDS)
-        if ((null != datasourceRecordKey && null != tableConfigRecordKey
-          && datasourceRecordKey != tableConfigRecordKey) || (null != datasourceRecordKey && datasourceRecordKey.nonEmpty
-          && tableConfigRecordKey == null)) {
-          // if both are non null, they should match.
-          // if incoming record key is non empty, table config should also be non empty.
-          diffConfigs.append(s"RecordKey:\t$datasourceRecordKey\t$tableConfigRecordKey\n")
+        if (tableConfig.contains(HoodieTableConfig.VERSION) && tableConfig.getInt(HoodieTableConfig.VERSION) > 1 ) {
+          if ((null != datasourceRecordKey && null != tableConfigRecordKey
+            && datasourceRecordKey != tableConfigRecordKey) || (null != datasourceRecordKey && datasourceRecordKey.nonEmpty
+            && tableConfigRecordKey == null)) {
+            // if both are non null, they should match.
+            // if incoming record key is non empty, table config should also be non empty.
+            diffConfigs.append(s"RecordKey:\t$datasourceRecordKey\t$tableConfigRecordKey\n")
+          }
         }
 
         val datasourcePreCombineKey = params.getOrElse(PRECOMBINE_FIELD.key(), null)
@@ -221,7 +280,7 @@ object HoodieWriterUtils {
         } else {
           SparkKeyGenUtils.getPartitionColumns(validatedKeyGenClassName, TypedProperties.fromMap(params.asJava))
         }
-        val tableConfigPartitionFields = tableConfig.getString(HoodieTableConfig.PARTITION_FIELDS)
+        val tableConfigPartitionFields = HoodieTableConfig.getPartitionFieldProp(tableConfig).orElse(null)
         if (null != datasourcePartitionFields && null != tableConfigPartitionFields
           && currentPartitionFields != tableConfigPartitionFields) {
           diffConfigs.append(s"PartitionPath:\t$currentPartitionFields\t$tableConfigPartitionFields\n")
@@ -285,8 +344,8 @@ object HoodieWriterUtils {
     PARTITIONPATH_FIELD -> HoodieTableConfig.PARTITION_FIELDS,
     RECORDKEY_FIELD -> HoodieTableConfig.RECORDKEY_FIELDS,
     PAYLOAD_CLASS_NAME -> HoodieTableConfig.PAYLOAD_CLASS_NAME,
-    PAYLOAD_TYPE -> HoodieTableConfig.PAYLOAD_TYPE,
-    RECORD_MERGER_STRATEGY -> HoodieTableConfig.RECORD_MERGER_STRATEGY
+    RECORD_MERGE_STRATEGY_ID -> HoodieTableConfig.RECORD_MERGE_STRATEGY_ID,
+    RECORD_MERGE_MODE -> HoodieTableConfig.RECORD_MERGE_MODE
   )
 
   def mappingSparkDatasourceConfigsToTableConfigs(options: Map[String, String]): Map[String, String] = {

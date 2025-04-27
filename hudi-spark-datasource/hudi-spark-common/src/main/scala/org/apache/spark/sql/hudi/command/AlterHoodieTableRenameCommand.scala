@@ -20,10 +20,10 @@ package org.apache.spark.sql.hudi.command
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.hadoop.fs.HadoopFSUtils
 
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable
 import org.apache.spark.sql.execution.command.{AlterTableRenameCommand, AlterTableSetPropertiesCommand}
-import org.apache.spark.sql.{Row, SparkSession}
 
 /**
  * Command for alter hudi table's table name.
@@ -39,7 +39,7 @@ case class AlterHoodieTableRenameCommand(
       val hoodieCatalogTable = HoodieCatalogTable(sparkSession, oldName)
 
       // Init table with new name.
-      HoodieTableMetaClient.withPropertyBuilder()
+      HoodieTableMetaClient.newTableBuilder()
         .fromProperties(hoodieCatalogTable.tableConfig.getProps)
         .setTableName(newName.table)
         .initTable(
@@ -52,8 +52,7 @@ case class AlterHoodieTableRenameCommand(
       // update table properties path in every op
       if (hoodieCatalogTable.table.properties.contains("path")) {
         val catalogTable = sparkSession.sessionState.catalog.getTableMetadata(newName)
-        val path = catalogTable.storage.locationUri.get.getPath
-        AlterTableSetPropertiesCommand(newName, Map("path" -> path), isView).run(sparkSession)
+        AlterTableSetPropertiesCommand(newName, Map("path" -> catalogTable.location.toString), isView).run(sparkSession)
       }
 
     }

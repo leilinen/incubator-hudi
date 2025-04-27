@@ -55,7 +55,7 @@ public class HoodieCompactor {
   public static final String SCHEDULE_AND_EXECUTE = "scheduleandexecute";
   private final Config cfg;
   private transient FileSystem fs;
-  private TypedProperties props;
+  private final TypedProperties props;
   private final JavaSparkContext jsc;
   private HoodieTableMetaClient metaClient;
 
@@ -73,7 +73,7 @@ public class HoodieCompactor {
     this.props.put(HoodieCleanConfig.ASYNC_CLEAN.key(), false);
     if (this.metaClient.getTableConfig().isMetadataTableAvailable()) {
       // add default lock config options if MDT is enabled.
-      UtilHelpers.addLockOptions(cfg.basePath, this.props);
+      UtilHelpers.addLockOptions(cfg.basePath, this.metaClient.getBasePath().toUri().getScheme(),  this.props);
     }
   }
 
@@ -96,7 +96,7 @@ public class HoodieCompactor {
     public int retry = 0;
     @Parameter(names = {"--skip-clean", "-sc"}, description = "do not trigger clean after compaction", required = false)
     public Boolean skipClean = true;
-    @Parameter(names = {"--schedule", "-sc"}, description = "Schedule compaction", required = false)
+    @Parameter(names = {"--schedule", "-sch"}, description = "Schedule compaction", required = false)
     public Boolean runSchedule = false;
     @Parameter(names = {"--mode", "-m"}, description = "Set job mode: Set \"schedule\" means make a compact plan; "
         + "Set \"execute\" means execute a compact plan at given instant which means --instant-time is needed here; "
@@ -261,7 +261,7 @@ public class HoodieCompactor {
         metaClient = HoodieTableMetaClient.reload(metaClient);
         Option<HoodieInstant> firstCompactionInstant = metaClient.getActiveTimeline().filterPendingCompactionTimeline().firstInstant();
         if (firstCompactionInstant.isPresent()) {
-          cfg.compactionInstantTime = firstCompactionInstant.get().getTimestamp();
+          cfg.compactionInstantTime = firstCompactionInstant.get().requestedTime();
           LOG.info("Found the earliest scheduled compaction instant which will be executed: "
               + cfg.compactionInstantTime);
         } else {

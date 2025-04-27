@@ -83,10 +83,10 @@ public abstract class WriteMarkers implements Serializable {
                                     String fileId, HoodieActiveTimeline activeTimeline) {
     if (writeConfig.getWriteConcurrencyMode().isOptimisticConcurrencyControl() && writeConfig.isEarlyConflictDetectionEnable()) {
       HoodieTimeline pendingCompactionTimeline = activeTimeline.filterPendingCompactionTimeline();
-      HoodieTimeline pendingReplaceTimeline = activeTimeline.filterPendingReplaceTimeline();
+      HoodieTimeline pendingReplaceTimeline = activeTimeline.filterPendingReplaceOrClusteringTimeline();
       // TODO If current is compact or clustering then create marker directly without early conflict detection.
       // Need to support early conflict detection between table service and common writers.
-      // ok to use filterPendingReplaceTimeline().containsInstant because early conflict detection is not relevant for insert overwrite as well
+      // ok to use filterPendingReplaceOrClusteringTimeline().containsInstant because early conflict detection is not relevant for insert overwrite as well
       if (pendingCompactionTimeline.containsInstant(instantTime) || pendingReplaceTimeline.containsInstant(instantTime)) {
         return create(partitionPath, fileName, type, false);
       }
@@ -108,6 +108,25 @@ public abstract class WriteMarkers implements Serializable {
   }
 
   /**
+   * Creates a log marker if the marker does not exist.
+   * This can invoke marker-based early conflict detection when enabled for multi-writers.
+   *
+   * @param partitionPath  partition path in the table
+   * @param fileName       file name
+   * @param writeConfig    Hudi write configs.
+   * @param fileId         File ID.
+   * @param activeTimeline Active timeline for the write operation.
+   * @return the marker path.
+   */
+  public Option<StoragePath> createLogMarkerIfNotExists(String partitionPath,
+                                                        String fileName,
+                                                        HoodieWriteConfig writeConfig,
+                                                        String fileId,
+                                                        HoodieActiveTimeline activeTimeline) {
+    return createIfNotExists(partitionPath, fileName, IOType.CREATE, writeConfig, fileId, activeTimeline);
+  }
+
+  /**
    * Creates a marker if the marker does not exist.
    * This can invoke marker-based early conflict detection when enabled for multi-writers.
    *
@@ -124,10 +143,10 @@ public abstract class WriteMarkers implements Serializable {
     if (writeConfig.isEarlyConflictDetectionEnable()
         && writeConfig.getWriteConcurrencyMode().isOptimisticConcurrencyControl()) {
       HoodieTimeline pendingCompactionTimeline = activeTimeline.filterPendingCompactionTimeline();
-      HoodieTimeline pendingReplaceTimeline = activeTimeline.filterPendingReplaceTimeline();
+      HoodieTimeline pendingReplaceTimeline = activeTimeline.filterPendingReplaceOrClusteringTimeline();
       // TODO If current is compact or clustering then create marker directly without early conflict detection.
       // Need to support early conflict detection between table service and common writers.
-      // ok to use filterPendingReplaceTimeline().containsInstant because early conflict detection is not relevant for insert overwrite as well
+      // ok to use filterPendingReplaceOrClusteringTimeline().containsInstant because early conflict detection is not relevant for insert overwrite as well
       if (pendingCompactionTimeline.containsInstant(instantTime) || pendingReplaceTimeline.containsInstant(instantTime)) {
         return create(partitionPath, fileName, type, true);
       }

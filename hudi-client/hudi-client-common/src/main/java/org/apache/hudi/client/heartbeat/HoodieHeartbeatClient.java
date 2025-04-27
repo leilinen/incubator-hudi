@@ -22,8 +22,8 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieHeartbeatException;
-import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -160,7 +160,7 @@ public class HoodieHeartbeatClient implements AutoCloseable, Serializable {
    * @param instantTime The instant time for the heartbeat.
    */
   public void start(String instantTime) {
-    LOG.info("Received request to start heartbeat for instant time " + instantTime);
+    LOG.info("Received request to start heartbeat for instant time {}", instantTime);
     Heartbeat heartbeat = instantToHeartbeatMap.get(instantTime);
     ValidationUtils.checkArgument(heartbeat == null || !heartbeat.isHeartbeatStopped(), "Cannot restart a stopped heartbeat for " + instantTime);
     if (heartbeat != null && heartbeat.isHeartbeatStarted()) {
@@ -184,13 +184,14 @@ public class HoodieHeartbeatClient implements AutoCloseable, Serializable {
    * @param instantTime The instant time for the heartbeat.
    * @throws HoodieException
    */
-  public void stop(String instantTime) throws HoodieException {
-    Heartbeat heartbeat = instantToHeartbeatMap.get(instantTime);
+  public Heartbeat stop(String instantTime) throws HoodieException {
+    Heartbeat heartbeat = instantToHeartbeatMap.remove(instantTime);
     if (isHeartbeatStarted(heartbeat)) {
       stopHeartbeatTimer(heartbeat);
       HeartbeatUtils.deleteHeartbeatFile(storage, basePath, instantTime);
-      LOG.info("Deleted heartbeat file for instant " + instantTime);
+      LOG.info("Deleted heartbeat file for instant {}", instantTime);
     }
+    return heartbeat;
   }
 
   /**
@@ -219,10 +220,10 @@ public class HoodieHeartbeatClient implements AutoCloseable, Serializable {
    * @param heartbeat The heartbeat to stop.
    */
   private void stopHeartbeatTimer(Heartbeat heartbeat) {
-    LOG.info("Stopping heartbeat for instant " + heartbeat.getInstantTime());
+    LOG.info("Stopping heartbeat for instant {}", heartbeat.getInstantTime());
     heartbeat.getTimer().cancel();
     heartbeat.setHeartbeatStopped(true);
-    LOG.info("Stopped heartbeat for instant " + heartbeat.getInstantTime());
+    LOG.info("Stopped heartbeat for instant {}", heartbeat.getInstantTime());
   }
 
   public static Boolean heartbeatExists(HoodieStorage storage, String basePath, String instantTime) throws IOException {

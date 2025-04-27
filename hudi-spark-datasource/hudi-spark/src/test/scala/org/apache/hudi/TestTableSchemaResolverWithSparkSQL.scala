@@ -28,8 +28,8 @@ import org.apache.avro.Schema
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.SaveMode
-import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.{Tag, Test}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 
@@ -72,7 +72,8 @@ class TestTableSchemaResolverWithSparkSQL extends HoodieSparkWriterTestBase {
     // Delete latest metadata table deltacommit
     // Get schema from metadata table hfile format base file.
     val latestInstant = metaClient.getActiveTimeline.getCommitsTimeline.getReverseOrderedInstants.findFirst()
-    val path = new Path(metadataTablePath + "/.hoodie", latestInstant.get().getFileName)
+    val instantFileNameGenerator = metaClient.getTimelineLayout.getInstantFileNameGenerator
+    val path = new Path(metadataTablePath + "/.hoodie", instantFileNameGenerator.getFileName(latestInstant.get()))
     val fs = path.getFileSystem(new Configuration())
     fs.delete(path, false)
     schemaValuationBasedOnDataFile(metaClient, HoodieMetadataRecord.getClassSchema.toString())

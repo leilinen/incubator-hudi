@@ -30,8 +30,9 @@ import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
 import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieEngineContext;
+import org.apache.hudi.common.engine.HoodieReaderContext;
+import org.apache.hudi.common.model.CompactionOperation;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
@@ -45,6 +46,7 @@ import org.apache.hudi.io.HoodieCreateHandle;
 import org.apache.hudi.io.HoodieMergeHandle;
 import org.apache.hudi.io.HoodieMergeHandleFactory;
 import org.apache.hudi.io.HoodieWriteHandle;
+import org.apache.hudi.io.v2.FlinkFileGroupReaderBasedMergeHandle;
 import org.apache.hudi.keygen.BaseKeyGenerator;
 import org.apache.hudi.keygen.factory.HoodieAvroKeyGeneratorFactory;
 import org.apache.hudi.metadata.MetadataPartitionType;
@@ -53,6 +55,7 @@ import org.apache.hudi.table.action.bootstrap.HoodieBootstrapWriteMetadata;
 import org.apache.hudi.table.action.clean.CleanActionExecutor;
 import org.apache.hudi.table.action.clean.CleanPlanActionExecutor;
 import org.apache.hudi.table.action.cluster.ClusteringPlanActionExecutor;
+import org.apache.hudi.table.action.commit.BucketInfo;
 import org.apache.hudi.table.action.commit.FlinkBulkInsertPreppedCommitActionExecutor;
 import org.apache.hudi.table.action.commit.FlinkDeleteCommitActionExecutor;
 import org.apache.hudi.table.action.commit.FlinkDeletePartitionCommitActionExecutor;
@@ -85,7 +88,7 @@ import java.util.Map;
  * UPDATES - Produce a new version of the file, just replacing the updated records with new values
  */
 public class HoodieFlinkCopyOnWriteTable<T>
-    extends HoodieFlinkTable<T> implements HoodieCompactionHandler<T> {
+    extends HoodieFlinkTable<T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(HoodieFlinkCopyOnWriteTable.class);
 
@@ -111,6 +114,26 @@ public class HoodieFlinkCopyOnWriteTable<T>
       String instantTime,
       List<HoodieRecord<T>> records) {
     return new FlinkUpsertCommitActionExecutor<>(context, writeHandle, config, this, instantTime, records).execute();
+  }
+
+  /**
+   * Upsert a batch of RowData into Hoodie table at the supplied instantTime.
+   *
+   * @param context     HoodieEngineContext
+   * @param writeHandle The write handle
+   * @param bucketInfo  The bucket info for the flushing data bucket
+   * @param instantTime Instant Time for the action
+   * @param records     hoodieRecords to upsert
+   * @return HoodieWriteMetadata
+   */
+  @Override
+  public HoodieWriteMetadata<List<WriteStatus>> upsert(
+      HoodieEngineContext context,
+      HoodieWriteHandle<?, ?, ?, ?> writeHandle,
+      BucketInfo bucketInfo,
+      String instantTime,
+      Iterator<HoodieRecord<T>> records) {
+    throw new UnsupportedOperationException("RowData upsert writing is not supported for COW yet.");
   }
 
   /**
@@ -410,6 +433,19 @@ public class HoodieFlinkCopyOnWriteTable<T>
   // -------------------------------------------------------------------------
   //  Used for compaction
   // -------------------------------------------------------------------------
+
+  @Override
+  public List<WriteStatus> compactUsingFileGroupReader(
+      String instantTime,
+      CompactionOperation operation,
+      HoodieWriteConfig writeConfig,
+      HoodieReaderContext readerContext) {
+    FlinkFileGroupReaderBasedMergeHandle mergeHandle = new FlinkFileGroupReaderBasedMergeHandle<>(
+        writeConfig, instantTime, this, operation, taskContextSupplier, Option.empty(), readerContext);
+    mergeHandle.write();
+    return mergeHandle.close();
+  }
+
   @Override
   public Iterator<List<WriteStatus>> handleUpdate(
       String instantTime, String partitionPath, String fileId,
@@ -430,7 +466,7 @@ public class HoodieFlinkCopyOnWriteTable<T>
     Option<BaseKeyGenerator> keyGeneratorOpt = Option.empty();
     if (!config.populateMetaFields()) {
       try {
-        keyGeneratorOpt = Option.of((BaseKeyGenerator) HoodieAvroKeyGeneratorFactory.createKeyGenerator(new TypedProperties(config.getProps())));
+        keyGeneratorOpt = Option.of((BaseKeyGenerator) HoodieAvroKeyGeneratorFactory.createKeyGenerator(config.getProps()));
       } catch (IOException e) {
         throw new HoodieIOException("Only BaseKeyGenerator (or any key generator that extends from BaseKeyGenerator) are supported when meta "
             + "columns are disabled. Please choose the right key generator if you wish to disable meta fields.", e);

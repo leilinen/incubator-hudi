@@ -46,13 +46,14 @@ import org.apache.hudi.source.FileIndex;
 import org.apache.hudi.source.IncrementalInputSplits;
 import org.apache.hudi.source.StreamReadMonitoringFunction;
 import org.apache.hudi.source.StreamReadOperator;
+import org.apache.hudi.source.prune.ColumnStatsProbe;
+import org.apache.hudi.source.prune.PartitionBucketIdFunc;
+import org.apache.hudi.source.prune.PartitionPruners;
+import org.apache.hudi.source.prune.PrimaryKeyPruners;
 import org.apache.hudi.source.rebalance.partitioner.StreamReadAppendPartitioner;
 import org.apache.hudi.source.rebalance.partitioner.StreamReadBucketIndexPartitioner;
 import org.apache.hudi.source.rebalance.selector.StreamReadAppendKeySelector;
 import org.apache.hudi.source.rebalance.selector.StreamReadBucketIndexKeySelector;
-import org.apache.hudi.source.prune.DataPruner;
-import org.apache.hudi.source.prune.PartitionPruners;
-import org.apache.hudi.source.prune.PrimaryKeyPruners;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.StoragePathInfo;
@@ -116,6 +117,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -154,9 +156,9 @@ public class HoodieTableSource implements
   private int[] requiredPos;
   private long limit;
   private List<Predicate> predicates;
-  private DataPruner dataPruner;
+  private ColumnStatsProbe columnStatsProbe;
   private PartitionPruners.PartitionPruner partitionPruner;
-  private int dataBucket;
+  private Option<Function<Integer, Integer>> dataBucketFunc; // numBuckets -> bucketId
   private transient FileIndex fileIndex;
 
   public HoodieTableSource(
@@ -165,7 +167,8 @@ public class HoodieTableSource implements
       List<String> partitionKeys,
       String defaultPartName,
       Configuration conf) {
-    this(schema, path, partitionKeys, defaultPartName, conf, null, null, null, PrimaryKeyPruners.BUCKET_ID_NO_PRUNING, null, null, null, null);
+    this(schema, path, partitionKeys, defaultPartName, conf, null, null, null,
+        Option.empty(), null, null, null, null);
   }
 
   public HoodieTableSource(
@@ -175,9 +178,9 @@ public class HoodieTableSource implements
       String defaultPartName,
       Configuration conf,
       @Nullable List<Predicate> predicates,
-      @Nullable DataPruner dataPruner,
+      @Nullable ColumnStatsProbe columnStatsProbe,
       @Nullable PartitionPruners.PartitionPruner partitionPruner,
-      int dataBucket,
+      Option<Function<Integer, Integer>> dataBucketFunc,
       @Nullable int[] requiredPos,
       @Nullable Long limit,
       @Nullable HoodieTableMetaClient metaClient,
@@ -189,9 +192,9 @@ public class HoodieTableSource implements
     this.defaultPartName = defaultPartName;
     this.conf = conf;
     this.predicates = Optional.ofNullable(predicates).orElse(Collections.emptyList());
-    this.dataPruner = dataPruner;
+    this.columnStatsProbe = columnStatsProbe;
     this.partitionPruner = partitionPruner;
-    this.dataBucket = dataBucket;
+    this.dataBucketFunc = dataBucketFunc;
     this.requiredPos = Optional.ofNullable(requiredPos).orElseGet(() -> IntStream.range(0, this.tableRowType.getFieldCount()).toArray());
     this.limit = Optional.ofNullable(limit).orElse(NO_LIMIT_CONSTANT);
     this.hadoopConf = new HadoopStorageConfiguration(HadoopConfigurations.getHadoopConf(conf));
@@ -266,7 +269,7 @@ public class HoodieTableSource implements
   @Override
   public DynamicTableSource copy() {
     return new HoodieTableSource(schema, path, partitionKeys, defaultPartName,
-        conf, predicates, dataPruner, partitionPruner, dataBucket, requiredPos, limit, metaClient, internalSchemaManager);
+        conf, predicates, columnStatsProbe, partitionPruner, dataBucketFunc, requiredPos, limit, metaClient, internalSchemaManager);
   }
 
   @Override
@@ -279,9 +282,9 @@ public class HoodieTableSource implements
     List<ResolvedExpression> simpleFilters = filterSimpleCallExpression(filters);
     Tuple2<List<ResolvedExpression>, List<ResolvedExpression>> splitFilters = splitExprByPartitionCall(simpleFilters, this.partitionKeys, this.tableRowType);
     this.predicates = ExpressionPredicates.fromExpression(splitFilters.f0);
-    this.dataPruner = DataPruner.newInstance(splitFilters.f0);
-    this.partitionPruner = cratePartitionPruner(splitFilters.f1);
-    this.dataBucket = getDataBucket(splitFilters.f0);
+    this.columnStatsProbe = ColumnStatsProbe.newInstance(splitFilters.f0);
+    this.partitionPruner = createPartitionPruner(splitFilters.f1, columnStatsProbe);
+    this.dataBucketFunc = getDataBucketFunc(splitFilters.f0);
     // refuse all the filters now
     return SupportsFilterPushDown.Result.of(new ArrayList<>(splitFilters.f1), new ArrayList<>(filters));
   }
@@ -308,7 +311,7 @@ public class HoodieTableSource implements
     return TableFunctionProvider.of(
         new HoodieLookupFunction(
             new HoodieLookupTableReader(this::getBatchInputFormat, conf),
-            tableRowType,
+            (RowType) getProducedDataType().notNull().getLogicalType(),
             getLookupKeys(context.getKeys()),
             duration,
             conf
@@ -330,19 +333,15 @@ public class HoodieTableSource implements
     List<String> fields = Arrays.stream(this.requiredPos)
         .mapToObj(i -> schemaFieldNames[i])
         .collect(Collectors.toList());
-    StringBuilder sb = new StringBuilder();
-    sb.append(operatorName)
-        .append("(")
-        .append("table=").append(Collections.singletonList(conf.getString(FlinkOptions.TABLE_NAME)))
-        .append(", ")
-        .append("fields=").append(fields)
-        .append(")");
-    return sb.toString();
+    return operatorName + "("
+        + "table=" + Collections.singletonList(conf.get(FlinkOptions.TABLE_NAME))
+        + ", " + "fields=" + fields
+        + ")";
   }
 
   @Nullable
-  private PartitionPruners.PartitionPruner cratePartitionPruner(List<ResolvedExpression> partitionFilters) {
-    if (partitionFilters.isEmpty()) {
+  private PartitionPruners.PartitionPruner createPartitionPruner(List<ResolvedExpression> partitionFilters, ColumnStatsProbe columnStatsProbe) {
+    if (!isPartitioned() || partitionFilters.isEmpty() && columnStatsProbe == null) {
       return null;
     }
     StringJoiner joiner = new StringJoiner(" and ");
@@ -353,21 +352,32 @@ public class HoodieTableSource implements
             this.schema.getColumn(name).orElseThrow(() -> new HoodieValidationException("Field " + name + " does not exist")))
         .map(SerializableSchema.Column::getDataType)
         .collect(Collectors.toList());
-    String defaultParName = conf.getString(FlinkOptions.PARTITION_DEFAULT_NAME);
-    boolean hivePartition = conf.getBoolean(FlinkOptions.HIVE_STYLE_PARTITIONING);
-    return PartitionPruners.getInstance(evaluators, this.partitionKeys, partitionTypes, defaultParName, hivePartition);
+    String defaultParName = conf.get(FlinkOptions.PARTITION_DEFAULT_NAME);
+    boolean hivePartition = conf.get(FlinkOptions.HIVE_STYLE_PARTITIONING);
+
+    return PartitionPruners.builder()
+        .basePath(path.toString())
+        .rowType(tableRowType)
+        .conf(conf)
+        .columnStatsProbe(columnStatsProbe)
+        .partitionEvaluators(evaluators)
+        .partitionKeys(partitionKeys)
+        .partitionTypes(partitionTypes)
+        .defaultParName(defaultParName)
+        .hivePartition(hivePartition)
+        .build();
   }
 
-  private int getDataBucket(List<ResolvedExpression> dataFilters) {
+  private Option<Function<Integer, Integer>> getDataBucketFunc(List<ResolvedExpression> dataFilters) {
     if (!OptionsResolver.isBucketIndexType(conf) || dataFilters.isEmpty()) {
-      return PrimaryKeyPruners.BUCKET_ID_NO_PRUNING;
+      return Option.empty();
     }
     Set<String> indexKeyFields = Arrays.stream(OptionsResolver.getIndexKeys(conf)).collect(Collectors.toSet());
     List<ResolvedExpression> indexKeyFilters = dataFilters.stream().filter(expr -> ExpressionUtils.isEqualsLitExpr(expr, indexKeyFields)).collect(Collectors.toList());
     if (!ExpressionUtils.isFilteringByAllFields(indexKeyFilters, indexKeyFields)) {
-      return PrimaryKeyPruners.BUCKET_ID_NO_PRUNING;
+      return Option.empty();
     }
-    return PrimaryKeyPruners.getBucketId(indexKeyFilters, conf);
+    return Option.of(PrimaryKeyPruners.getBucketIdFunc(indexKeyFilters, conf));
   }
 
   private List<MergeOnReadInputSplit> buildInputSplits() {
@@ -388,7 +398,7 @@ public class HoodieTableSource implements
     if (!fsView.getLastInstant().isPresent()) {
       return Collections.emptyList();
     }
-    String latestCommit = fsView.getLastInstant().get().getTimestamp();
+    String latestCommit = fsView.getLastInstant().get().requestedTime();
     final String mergeType = this.conf.getString(FlinkOptions.MERGE_TYPE);
     final AtomicInteger cnt = new AtomicInteger(0);
     // generates one input split for each file group
@@ -602,9 +612,10 @@ public class HoodieTableSource implements
           .path(this.path)
           .conf(this.conf)
           .rowType(this.tableRowType)
-          .dataPruner(this.dataPruner)
+          .columnStatsProbe(this.columnStatsProbe)
           .partitionPruner(this.partitionPruner)
-          .dataBucket(this.dataBucket)
+          .partitionBucketIdFunc(PartitionBucketIdFunc.create(this.dataBucketFunc,
+              this.metaClient, conf.getInteger(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS)))
           .build();
     }
     return this.fileIndex;
@@ -622,6 +633,10 @@ public class HoodieTableSource implements
       i++;
     }
     return keyIndices;
+  }
+
+  private boolean isPartitioned() {
+    return !this.partitionKeys.isEmpty() && this.partitionKeys.stream().noneMatch(String::isEmpty);
   }
 
   @VisibleForTesting
@@ -660,12 +675,17 @@ public class HoodieTableSource implements
    */
   @VisibleForTesting
   public List<StoragePathInfo> getReadFiles() {
-    FileIndex fileIndex = getOrBuildFileIndex();
-    List<String> relPartitionPaths = fileIndex.getOrBuildPartitionPaths();
+    List<String> relPartitionPaths = getReadPartitions();
     if (relPartitionPaths.isEmpty()) {
       return Collections.emptyList();
     }
     return fileIndex.getFilesInPartitions();
+  }
+
+  @VisibleForTesting
+  public List<String> getReadPartitions() {
+    FileIndex fileIndex = getOrBuildFileIndex();
+    return fileIndex.getOrBuildPartitionPaths();
   }
 
   @VisibleForTesting
@@ -674,12 +694,12 @@ public class HoodieTableSource implements
   }
 
   @VisibleForTesting
-  public DataPruner getDataPruner() {
-    return dataPruner;
+  public ColumnStatsProbe getColumnStatsProbe() {
+    return columnStatsProbe;
   }
 
   @VisibleForTesting
-  public int getDataBucket() {
-    return dataBucket;
+  public Option<Function<Integer, Integer>> getDataBucketFunc() {
+    return dataBucketFunc;
   }
 }

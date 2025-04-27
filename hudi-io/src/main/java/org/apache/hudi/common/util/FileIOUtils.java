@@ -20,6 +20,7 @@
 package org.apache.hudi.common.util;
 
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.storage.HoodieInstantWriter;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.StoragePathInfo;
@@ -166,32 +167,32 @@ public class FileIOUtils {
 
   public static void createFileInPath(HoodieStorage storage,
                                       StoragePath fullPath,
-                                      Option<byte[]> content, boolean ignoreIOE) {
+                                      Option<HoodieInstantWriter> contentWriter, boolean ignoreIOE) {
     try {
       // If the path does not exist, create it first
       if (!storage.exists(fullPath)) {
         if (storage.createNewFile(fullPath)) {
-          LOG.info("Created a new file in meta path: " + fullPath);
+          LOG.info("Created a new file in meta path: {}", fullPath);
         } else {
           throw new HoodieIOException("Failed to create file " + fullPath);
         }
       }
 
-      if (content.isPresent()) {
+      if (contentWriter.isPresent()) {
         try (OutputStream out = storage.create(fullPath, true)) {
-          out.write(content.get());
+          contentWriter.get().writeToStream(out);
         }
       }
     } catch (IOException e) {
-      LOG.warn("Failed to create file " + fullPath, e);
+      LOG.warn("Failed to create file {}", fullPath, e);
       if (!ignoreIOE) {
         throw new HoodieIOException("Failed to create file " + fullPath, e);
       }
     }
   }
 
-  public static void createFileInPath(HoodieStorage storage, StoragePath fullPath, Option<byte[]> content) {
-    createFileInPath(storage, fullPath, content, false);
+  public static void createFileInPath(HoodieStorage storage, StoragePath fullPath, Option<HoodieInstantWriter> contentWriter) {
+    createFileInPath(storage, fullPath, contentWriter, false);
   }
 
   public static boolean copy(HoodieStorage srcStorage, StoragePath src,
@@ -243,7 +244,7 @@ public class FileIOUtils {
     try (InputStream is = storage.open(detailPath)) {
       return Option.of(FileIOUtils.readAsByteArray(is));
     } catch (IOException e) {
-      LOG.warn("Could not read commit details from " + detailPath, e);
+      LOG.warn("Could not read commit details from {}", detailPath, e);
       if (!ignoreIOE) {
         throw new HoodieIOException("Could not read commit details from " + detailPath, e);
       }

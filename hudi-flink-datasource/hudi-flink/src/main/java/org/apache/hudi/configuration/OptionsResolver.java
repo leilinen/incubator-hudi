@@ -25,8 +25,10 @@ import org.apache.hudi.client.transaction.SimpleConcurrentFileWritesConflictReso
 import org.apache.hudi.common.config.HoodieCommonConfig;
 import org.apache.hudi.common.model.DefaultHoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
+import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteConcurrencyMode;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
 import org.apache.hudi.common.table.timeline.TimelineUtils.HollowCommitHandling;
 import org.apache.hudi.common.util.StringUtils;
@@ -34,6 +36,7 @@ import org.apache.hudi.config.HoodieCleanConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.index.HoodieIndex;
+import org.apache.hudi.index.bucket.partition.PartitionBucketIndexUtils;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 import org.apache.hudi.sink.overwrite.PartitionOverwriteMode;
 import org.apache.hudi.table.format.FilePathUtils;
@@ -67,6 +70,29 @@ public class OptionsResolver {
     // 1. inline clustering is supported for COW table;
     // 2. async clustering is supported for both COW and MOR table
     return isInsertOperation(conf) && ((isCowTable(conf) && !conf.getBoolean(FlinkOptions.INSERT_CLUSTER)) || isMorTable(conf));
+  }
+
+  /**
+   * Returns whether the RowData append is enabled with given configuration {@code conf}.
+   * <p>
+   * todo:
+   * <p> support RowData append for COW, see HUDI-9149
+   * <p> support RowData append for operation besides UPSERT/DELETE, see HUDI-9149
+   */
+  public static boolean supportRowDataAppend(Configuration conf) {
+    return conf.get(FlinkOptions.INSERT_ROWDATA_MODE_ENABLED)
+        && HoodieTableType.valueOf(conf.get(FlinkOptions.TABLE_TYPE)) == HoodieTableType.MERGE_ON_READ
+        && (WriteOperationType.valueOf(conf.get(FlinkOptions.OPERATION).toUpperCase()) == WriteOperationType.UPSERT
+            || WriteOperationType.valueOf(conf.get(FlinkOptions.OPERATION).toUpperCase()) == WriteOperationType.DELETE);
+  }
+
+  /**
+   * Returns whether current index is partition level simple bucket index based on given configuration {@code conf}.
+   */
+  public static Boolean isPartitionLevelSimpleBucketIndex(Configuration conf) {
+    HoodieIndex.BucketIndexEngineType engineType = OptionsResolver.getBucketEngineType(conf);
+    return engineType.equals(HoodieIndex.BucketIndexEngineType.SIMPLE)
+        && PartitionBucketIndexUtils.isPartitionSimpleBucketIndex(HadoopConfigurations.getHadoopConf(conf), conf.get(FlinkOptions.PATH));
   }
 
   /**
@@ -194,12 +220,21 @@ public class OptionsResolver {
   /**
    * Returns whether the source should emit changelog.
    *
-   * @return true if the source is read as streaming with changelog mode enabled
+   * @return true if the source should emit changes.
    */
   public static boolean emitChangelog(Configuration conf) {
     return conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CHANGELOG_ENABLED)
         || conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CDC_ENABLED)
         || isIncrementalQuery(conf) && conf.getBoolean(FlinkOptions.CDC_ENABLED);
+  }
+
+  /**
+   * Returns whether the source should emit deletes.
+   *
+   * @return true if the source is read as streaming with changelog mode enabled.
+   */
+  public static boolean emitDeletes(Configuration conf) {
+    return conf.getBoolean(FlinkOptions.READ_AS_STREAMING) && conf.getBoolean(FlinkOptions.CHANGELOG_ENABLED);
   }
 
   /**
@@ -352,6 +387,28 @@ public class OptionsResolver {
     HollowCommitHandling handlingMode = HollowCommitHandling.valueOf(conf
         .getString(INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT.key(), INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT.defaultValue()));
     return handlingMode == HollowCommitHandling.USE_TRANSITION_TIME;
+  }
+
+  /**
+   * Returns whether to read the data changes only from changelog files. When CDC is enabled,
+   * i) for COW table, the changelog is generated on each file update;
+   * ii) for MOR table, the changelog is generated on compaction.
+   *
+   * <p>By default, always read from the changelog file,
+   * once it is disabled, the reader would infer the changes based on the file slice dependencies.
+   */
+  public static boolean readCDCFromChangelog(Configuration conf) {
+    return conf.getBoolean(FlinkOptions.READ_CDC_FROM_CHANGELOG);
+  }
+
+  /**
+   * Returns whether to populate meta fields or not
+   */
+  public static boolean isPopulateMetaFields(Configuration conf) {
+    return Boolean.parseBoolean(
+        conf.getString(
+            HoodieTableConfig.POPULATE_META_FIELDS.key(),
+            HoodieTableConfig.POPULATE_META_FIELDS.defaultValue().toString()));
   }
 
   /**

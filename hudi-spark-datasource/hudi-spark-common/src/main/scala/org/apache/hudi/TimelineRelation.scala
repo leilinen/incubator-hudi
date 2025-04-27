@@ -17,15 +17,14 @@
 
 package org.apache.hudi
 
-
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.table.timeline.{HoodieInstant, TimelineUtils}
 import org.apache.hudi.common.util.CommitUtils
 
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.sql.sources.{BaseRelation, TableScan}
 import org.apache.spark.sql.types.{LongType, StringType, StructField, StructType}
-import org.apache.spark.sql.{Row, SQLContext}
 import org.slf4j.LoggerFactory
 
 import java.util.function.Consumer
@@ -84,6 +83,7 @@ class TimelineRelation(val sqlContext: SQLContext,
         var totalRecordsWritten: Long = -1
         var totalUpdatedRecordsWritten: Long = -1
         var totalWriteErrors: Long = -1
+        val instantFileNameGenerator = metaClient.getTimelineLayout.getInstantFileNameGenerator;
 
         val commitMetadataOpt = CommitUtils.buildMetadataFromInstant(timeline, instant)
         if (commitMetadataOpt.isPresent) {
@@ -96,11 +96,11 @@ class TimelineRelation(val sqlContext: SQLContext,
           totalWriteErrors = commitMetadata.fetchTotalWriteErrors
         }
 
-        val r = Row(instant.getTimestamp,
+        val r = Row(instant.requestedTime,
           instant.getAction,
           instant.getState.toString,
           instant.getCompletionTime,
-          instant.getFileName,
+          instantFileNameGenerator.getFileName(instant),
           totalBytesWritten,
           totalFilesUpdated,
           totalPartitionsWritten,

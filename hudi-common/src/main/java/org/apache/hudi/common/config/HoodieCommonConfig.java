@@ -18,7 +18,6 @@
 
 package org.apache.hudi.common.config;
 
-import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.timeline.TimelineUtils.HollowCommitHandling;
 import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 
@@ -82,8 +81,6 @@ public class HoodieCommonConfig extends HoodieConfig {
           + " operation will fail schema compatibility check. Set this option to true will make the missing "
           + " column be filled with null values to successfully complete the write operation.");
 
-  public static final ConfigProperty<String> RECORD_MERGE_MODE = HoodieTableConfig.RECORD_MERGE_MODE;
-
   public static final ConfigProperty<ExternalSpillableMap.DiskMapType> SPILLABLE_DISK_MAP_TYPE = ConfigProperty
       .key("hoodie.common.spillable.diskmap.type")
       .defaultValue(ExternalSpillableMap.DiskMapType.BITCASK)
@@ -139,6 +136,20 @@ public class HoodieCommonConfig extends HoodieConfig {
       .markAdvanced()
       .withDocumentation("Property to control the max memory in bytes for dfs input stream buffer size");
 
+  public static final ConfigProperty<Boolean> HOODIE_FILE_INDEX_USE_SPILLABLE_MAP = ConfigProperty
+      .key("hoodie.file.index.cache.use.spillable.map")
+      .defaultValue(false)
+      .sinceVersion("1.1.0")
+      .markAdvanced()
+      .withDocumentation("Property to enable spillable map for caching input file slices in org.apache.hudi.BaseHoodieTableFileIndex");
+
+  public static final ConfigProperty<Long> HOODIE_FILE_INDEX_SPILLABLE_MEMORY = ConfigProperty
+      .key("hoodie.file.index.cache.spillable.mem")
+      .defaultValue(500 * 1024L * 1024L) // 500 MB
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Amount of memory to be used in bytes for holding cachedAllInputFileSlices in org.apache.hudi.BaseHoodieTableFileIndex.");
+  
   public static final long DEFAULT_MAX_MEMORY_FOR_SPILLABLE_MAP_IN_BYTES = 1024 * 1024 * 1024L;
 
   public ExternalSpillableMap.DiskMapType getSpillableDiskMapType() {

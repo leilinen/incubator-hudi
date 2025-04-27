@@ -19,16 +19,21 @@
 package org.apache.spark.sql
 
 import org.apache.hudi.common.model.HoodieRecord
+import org.apache.hudi.common.util.Functions
+import org.apache.hudi.common.util.hash.BucketIndexUtil
 import org.apache.hudi.index.bucket.BucketIdentifier
+import org.apache.hudi.index.bucket.partition.NumBucketsFunction
+
 import org.apache.spark.Partitioner
 import org.apache.spark.sql.catalyst.InternalRow
 
 object BucketPartitionUtils {
-  def createDataFrame(df: DataFrame, indexKeyFields: String, bucketNum: Int, partitionNum: Int): DataFrame = {
+  def createDataFrame(df: DataFrame, indexKeyFields: String, numBucketsFunction: NumBucketsFunction, partitionNum: Int): DataFrame = {
     def getPartitionKeyExtractor(): InternalRow => (String, Int) = row => {
-      val kb = BucketIdentifier
-        .getBucketId(row.getString(HoodieRecord.RECORD_KEY_META_FIELD_ORD), indexKeyFields, bucketNum)
       val partition = row.getString(HoodieRecord.PARTITION_PATH_META_FIELD_ORD)
+      val kb = BucketIdentifier
+        .getBucketId(row.getString(HoodieRecord.RECORD_KEY_META_FIELD_ORD), indexKeyFields, numBucketsFunction.getNumBuckets(partition))
+
       if (partition == null || partition.trim.isEmpty) {
         ("", kb)
       } else {
@@ -38,12 +43,15 @@ object BucketPartitionUtils {
 
     val getPartitionKey = getPartitionKeyExtractor()
     val partitioner = new Partitioner {
+
+      private val partitionIndexFunc: Functions.Function3[Integer, String, Integer, Integer] =
+        BucketIndexUtil.getPartitionIndexFunc(partitionNum)
+
       override def numPartitions: Int = partitionNum
 
-      override def getPartition(key: Any): Int = {
-        val t = key.asInstanceOf[(String, Int)]
-        val pw = (t._1.hashCode & Int.MaxValue) % partitionNum
-        BucketIdentifier.mod(t._2 + pw, partitionNum)
+      override def getPartition(value: Any): Int = {
+        val partitionKeyPair = value.asInstanceOf[(String, Int)]
+        partitionIndexFunc.apply(numBucketsFunction.getNumBuckets(partitionKeyPair._1), partitionKeyPair._1, partitionKeyPair._2)
       }
     }
     // use internalRow to avoid extra convert.

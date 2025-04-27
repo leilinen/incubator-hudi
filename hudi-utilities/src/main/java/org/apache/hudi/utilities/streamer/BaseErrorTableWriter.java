@@ -22,11 +22,13 @@ package org.apache.hudi.utilities.streamer;
 import org.apache.hudi.ApiMaturityLevel;
 import org.apache.hudi.PublicAPIClass;
 import org.apache.hudi.PublicAPIMethod;
+import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.VisibleForTesting;
+import org.apache.hudi.utilities.ingestion.HoodieIngestionMetrics;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.spark.api.java.JavaRDD;
@@ -54,6 +56,14 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Seri
                               TypedProperties props, HoodieSparkEngineContext hoodieSparkContext, FileSystem fileSystem) {
   }
 
+  public BaseErrorTableWriter(HoodieStreamer.Config cfg,
+                              SparkSession sparkSession,
+                              TypedProperties props,
+                              HoodieSparkEngineContext hoodieSparkContext,
+                              FileSystem fs,
+                              Option<HoodieIngestionMetrics> metrics) {
+  }
+
   /**
    * Processes input error events. These error events would be committed later through upsertAndCommit
    * API call.
@@ -76,4 +86,8 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Seri
    */
   @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public abstract boolean upsertAndCommit(String baseTableInstantTime, Option<String> commitedInstantTime);
+
+  public abstract JavaRDD<WriteStatus> upsert(String errorTableInstantTime, String baseTableInstantTime, Option<String> commitedInstantTime);
+
+  public abstract boolean commit(String errorTableInstantTime, JavaRDD<WriteStatus> writeStatuses);
 }

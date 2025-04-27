@@ -25,8 +25,8 @@ import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.storage.{HoodieStorageUtils, StoragePath}
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog._
-import org.apache.spark.sql.catalyst.{QualifiedTableName, TableIdentifier}
 
 /**
  * Physical plan node for dropping a table.
@@ -46,10 +46,7 @@ case class DropHoodieTableCommand(
     if (!sparkSession.catalog.tableExists(tableIdentifier.unquotedString)) {
       sparkSession.catalog.refreshTable(tableIdentifier.unquotedString)
     }
-    val qualifiedTableName = QualifiedTableName(
-      tableIdentifier.database.getOrElse(sparkSession.sessionState.catalog.getCurrentDatabase),
-      tableIdentifier.table)
-    sparkSession.sessionState.catalog.invalidateCachedTable(qualifiedTableName)
+    sparkSession.sessionState.catalog.invalidateCachedTable(tableIdentifier)
 
     dropTableInCatalog(sparkSession, tableIdentifier, ifExists, purge)
 

@@ -86,11 +86,14 @@ public class MetricsReporterFactory {
         reporter = new ConsoleMetricsReporter(registry);
         break;
       case CLOUDWATCH:
-        reporter = (MetricsReporter) ReflectionUtils.loadClass("org.apache.hudi.metrics.cloudwatch.CloudWatchMetricsReporter",
+        reporter = (MetricsReporter) ReflectionUtils.loadClass("org.apache.hudi.aws.metrics.cloudwatch.CloudWatchMetricsReporter",
             new Class[]{HoodieMetricsConfig.class, MetricRegistry.class}, metricsConfig, registry);
         break;
       case M3:
         reporter = new M3MetricsReporter(metricsConfig, registry);
+        break;
+      case SLF4J:
+        reporter = new Slf4jMetricsReporter(registry);
         break;
       default:
         LOG.error("Reporter type[" + type + "] is not supported.");

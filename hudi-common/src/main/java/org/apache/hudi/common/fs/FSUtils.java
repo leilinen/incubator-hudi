@@ -19,13 +19,14 @@
 
 package org.apache.hudi.common.fs;
 
+import org.apache.hudi.avro.model.HoodieFileStatus;
+import org.apache.hudi.avro.model.HoodiePath;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.ImmutablePair;
@@ -44,6 +45,7 @@ import org.apache.hudi.storage.StoragePathFilter;
 import org.apache.hudi.storage.StoragePathInfo;
 import org.apache.hudi.storage.inline.InLineFSUtils;
 
+import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,6 +82,7 @@ public class FSUtils {
   public static final Pattern LOG_FILE_PATTERN =
       Pattern.compile("^\\.(.+)_(.*)\\.(log|archive)\\.(\\d+)(_((\\d+)-(\\d+)-(\\d+))(.cdc)?)?");
   public static final Pattern PREFIX_BY_FILE_ID_PATTERN = Pattern.compile("^(.+)-(\\d+)");
+  private static final Pattern BASE_FILE_PATTERN = Pattern.compile("[a-zA-Z0-9-]+_[a-zA-Z0-9-]+_[0-9]+\\.[a-zA-Z0-9]+");
 
   private static final String LOG_FILE_EXTENSION = ".log";
 
@@ -127,10 +130,6 @@ public class FSUtils {
         .defaultValue().getFileExtension());
   }
 
-  public static String getCommitFromCommitFile(String commitFileName) {
-    return HoodieInstant.extractTimestamp(commitFileName);
-  }
-
   public static String getCommitTime(String fullFileName) {
     try {
       if (isLogFile(fullFileName)) {
@@ -142,12 +141,30 @@ public class FSUtils {
     }
   }
 
+  public static String getCommitTimeWithFullPath(String path) {
+    String fullFileName;
+    if (path.contains("/")) {
+      fullFileName = path.substring(path.lastIndexOf("/") + 1);
+    } else {
+      fullFileName = path;
+    }
+    return getCommitTime(fullFileName);
+  }
+
   public static long getFileSize(HoodieStorage storage, StoragePath path) throws IOException {
     return storage.getPathInfo(path).getLength();
   }
 
   public static String getFileId(String fullFileName) {
     return fullFileName.split("_", 2)[0];
+  }
+
+  /**
+   * @param filePath
+   * @returns the filename from the given path. Path could be the absolute path or just partition path and file name.
+   */
+  public static String getFileNameFromPath(String filePath) {
+    return filePath.substring(filePath.lastIndexOf("/") + 1);
   }
 
   /**
@@ -428,7 +445,10 @@ public class FSUtils {
 
   public static boolean isBaseFile(StoragePath path) {
     String extension = getFileExtension(path.getName());
-    return HoodieFileFormat.BASE_FILE_EXTENSIONS.contains(extension);
+    if (HoodieFileFormat.BASE_FILE_EXTENSIONS.contains(extension)) {
+      return BASE_FILE_PATTERN.matcher(path.getName()).matches();
+    }
+    return false;
   }
 
   public static boolean isLogFile(StoragePath logPath) {
@@ -461,13 +481,9 @@ public class FSUtils {
         String extension = FSUtils.getFileExtension(path.getName());
         return validFileExtensions.contains(extension) || path.getName().contains(logFileExtension);
       }).stream().filter(StoragePathInfo::isFile).collect(Collectors.toList());
-    } catch (IOException e) {
+    } catch (FileNotFoundException ex) {
       // return empty FileStatus if partition does not exist already
-      if (!storage.exists(partitionPath)) {
-        return Collections.emptyList();
-      } else {
-        throw e;
-      }
+      return Collections.emptyList();
     }
   }
 
@@ -600,6 +616,31 @@ public class FSUtils {
     return false;
   }
 
+  public static HoodiePath fromStoragePath(StoragePath path) {
+    if (null == path) {
+      return null;
+    }
+    return HoodiePath.newBuilder().setUri(path.toString()).build();
+  }
+
+  public static HoodieFileStatus fromPathInfo(StoragePathInfo pathInfo) {
+    if (null == pathInfo) {
+      return null;
+    }
+
+    HoodieFileStatus fStatus = new HoodieFileStatus();
+
+    fStatus.setPath(fromStoragePath(pathInfo.getPath()));
+    fStatus.setLength(pathInfo.getLength());
+    fStatus.setIsDir(pathInfo.isDirectory());
+    fStatus.setBlockReplication((int) pathInfo.getBlockReplication());
+    fStatus.setBlockSize(pathInfo.getBlockSize());
+    fStatus.setModificationTime(pathInfo.getModificationTime());
+    fStatus.setAccessTime(pathInfo.getModificationTime());
+
+    return fStatus;
+  }
+
   /**
    * Processes sub-path in parallel.
    *
@@ -684,6 +725,22 @@ public class FSUtils {
       }
     }
     return pathInfoList;
+  }
+
+  public static boolean comparePathsWithoutScheme(String pathStr1, String pathStr2) {
+    Path pathWithoutScheme1 = getPathWithoutScheme(new Path(pathStr1));
+    Path pathWithoutScheme2 = getPathWithoutScheme(new Path(pathStr2));
+    return pathWithoutScheme1.equals(pathWithoutScheme2);
+  }
+
+  public static Path getPathWithoutScheme(Path path) {
+    return path.isUriPathAbsolute()
+        ? new Path(null, path.toUri().getAuthority(), path.toUri().getPath()) : path;
+  }
+
+  // Converts s3a to s3a
+  public static String s3aToS3(String s3aUrl) {
+    return s3aUrl.replaceFirst("(?i)^s3a://", "s3://");
   }
 
   /**

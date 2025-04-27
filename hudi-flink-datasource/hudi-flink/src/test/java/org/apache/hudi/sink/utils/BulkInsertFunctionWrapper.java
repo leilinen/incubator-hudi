@@ -18,6 +18,7 @@
 
 package org.apache.hudi.sink.utils;
 
+import org.apache.hudi.adapter.CollectOutputAdapter;
 import org.apache.hudi.adapter.TestStreamConfigs;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.OptionsResolver;
@@ -28,6 +29,7 @@ import org.apache.hudi.sink.bulk.BulkInsertWriteFunction;
 import org.apache.hudi.sink.bulk.RowDataKeyGen;
 import org.apache.hudi.sink.bulk.sort.SortOperator;
 import org.apache.hudi.sink.bulk.sort.SortOperatorGen;
+import org.apache.hudi.sink.common.AbstractWriteFunction;
 import org.apache.hudi.sink.event.WriteMetadataEvent;
 import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
@@ -79,7 +81,7 @@ public class BulkInsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   private MapFunction<RowData, RowData> mapFunction;
   private Map<String, String> bucketIdToFileId;
   private SortOperator sortOperator;
-  private CollectorOutput<RowData> output;
+  private CollectOutputAdapter<RowData> output;
 
   public BulkInsertFunctionWrapper(String tablePath, Configuration conf) throws Exception {
     ioManager = new IOManagerAsync();
@@ -175,6 +177,11 @@ public class BulkInsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     return coordinator;
   }
 
+  @Override
+  public AbstractWriteFunction getWriteFunction() {
+    return this.writeFunction;
+  }
+
   public MockOperatorCoordinatorContext getCoordinatorContext() {
     return coordinatorContext;
   }
@@ -211,7 +218,7 @@ public class BulkInsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     int numBuckets = conf.getInteger(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS);
     boolean needFixedFileIdSuffix = OptionsResolver.isNonBlockingConcurrencyControl(conf);
     this.bucketIdToFileId = new HashMap<>();
-    this.mapFunction = r -> BucketBulkInsertWriterHelper.rowWithFileId(bucketIdToFileId, keyGen, r, indexKeys, numBuckets, needFixedFileIdSuffix);
+    this.mapFunction = r -> BucketBulkInsertWriterHelper.rowWithFileId(bucketIdToFileId, keyGen, r, indexKeys, conf, needFixedFileIdSuffix);
   }
 
   private void setupSortOperator() throws Exception {
@@ -227,7 +234,7 @@ public class BulkInsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     SortOperatorGen sortOperatorGen = BucketBulkInsertWriterHelper.getFileIdSorterGen(rowTypeWithFileId);
     this.sortOperator = (SortOperator) sortOperatorGen.createSortOperator(conf);
     this.sortOperator.setProcessingTimeService(new TestProcessingTimeService());
-    this.output = new CollectorOutput<>();
+    this.output = new CollectOutputAdapter<>();
     StreamConfig streamConfig = new StreamConfig(conf);
     streamConfig.setOperatorID(new OperatorID());
     RowDataSerializer inputSerializer = new RowDataSerializer(rowTypeWithFileId);

@@ -25,6 +25,7 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.io.storage.HoodieIOFactory;
+import org.apache.hudi.storage.HoodieInstantWriter;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
@@ -41,13 +42,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.apache.hudi.common.table.HoodieTableMetaClient.COMMIT_TIME_KEY;
+
 /**
  * The metadata that goes into the meta file in each partition.
  */
 public class HoodiePartitionMetadata {
 
   public static final String HOODIE_PARTITION_METAFILE_PREFIX = ".hoodie_partition_metadata";
-  public static final String COMMIT_TIME_KEY = "commitTime";
   private static final String PARTITION_DEPTH_KEY = "partitionDepth";
   private static final Logger LOG = LoggerFactory.getLogger(HoodiePartitionMetadata.class);
 
@@ -111,8 +113,8 @@ public class HoodiePartitionMetadata {
               // Backwards compatible properties file format
               try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
                 props.store(os, "partition metadata");
-                Option content = Option.of(os.toByteArray());
-                storage.createImmutableFileInPath(metaPath, content);
+                Option<byte []> content = Option.of(os.toByteArray());
+                storage.createImmutableFileInPath(metaPath, content.map(HoodieInstantWriter::convertByteArrayToWriter));
               }
             }
           }
@@ -179,7 +181,7 @@ public class HoodiePartitionMetadata {
       format = Option.empty();
       return true;
     } catch (Throwable t) {
-      LOG.debug("Unable to read partition meta properties file for partition " + partitionPath);
+      LOG.debug("Unable to read partition meta properties file for partition {}", partitionPath);
       return false;
     }
   }
@@ -197,7 +199,7 @@ public class HoodiePartitionMetadata {
         format = Option.of(reader.getFormat());
         return true;
       } catch (Throwable t) {
-        LOG.debug("Unable to read partition metadata " + metafilePath.getName() + " for partition " + partitionPath);
+        LOG.debug("Unable to read partition metadata {} for partition {}", metafilePath.getName(), partitionPath);
       }
     }
     return false;

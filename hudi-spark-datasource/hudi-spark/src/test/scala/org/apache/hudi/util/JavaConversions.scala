@@ -18,10 +18,11 @@
 
 package org.apache.hudi.util
 
-import org.apache.spark.sql.execution.datasources.parquet.TestSparkParquetReaderFormat
 import org.apache.hudi.SparkAdapterSupport
-import org.apache.spark.sql.execution.datasources.DataSource
+
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.execution.datasources.DataSource
+import org.apache.spark.sql.execution.datasources.parquet.TestSparkParquetReaderFormat
 
 import java.util.function.Predicate
 

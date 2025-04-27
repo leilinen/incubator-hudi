@@ -19,29 +19,29 @@
 
 package org.apache.hudi.functional
 
+import org.apache.hudi.{DataSourceWriteOptions, HoodieDataSourceHelpers, ScalaAssertionSupport}
 import org.apache.hudi.HoodieConversionUtils.toJavaOption
-import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType
 import org.apache.hudi.common.model.{HoodieRecord, HoodieTableType}
+import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType
 import org.apache.hudi.common.testutils.RawTripTestPayload.recordsToStrings
 import org.apache.hudi.common.util.Option
-import org.apache.hudi.exception.ExceptionUtil.getRootCause
 import org.apache.hudi.exception.{HoodieException, HoodieKeyGeneratorException}
+import org.apache.hudi.exception.ExceptionUtil.getRootCause
 import org.apache.hudi.functional.CommonOptionUtils._
+import org.apache.hudi.keygen.{ComplexKeyGenerator, NonpartitionedKeyGenerator, SimpleKeyGenerator, TimestampBasedKeyGenerator}
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions.Config
-import org.apache.hudi.keygen.{ComplexKeyGenerator, NonpartitionedKeyGenerator, SimpleKeyGenerator, TimestampBasedKeyGenerator}
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 import org.apache.hudi.util.JFunction
-import org.apache.hudi.{DataSourceWriteOptions, HoodieDataSourceHelpers, ScalaAssertionSupport}
 
 import org.apache.hadoop.fs.FileSystem
+import org.apache.spark.sql.{SaveMode, SparkSession, SparkSessionExtensions}
 import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.hudi.HoodieSparkSessionExtension
-import org.apache.spark.sql.{SaveMode, SparkSession, SparkSessionExtensions}
-import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.CsvSource
+import org.junit.jupiter.params.provider.{CsvSource, EnumSource}
 
 import java.util.function.Consumer
 
@@ -210,7 +210,7 @@ class TestAutoGenerationOfRecordKeys extends HoodieSparkClientTestBase with Scal
     var options: Map[String, String] = vanillaWriteOpts ++ Map(
       DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> classOf[SimpleKeyGenerator].getCanonicalName)
 
-    // NOTE: In this test we deliberately removing record-key configuration
+    // NOTE: In this test we are deliberately removing record-key configuration
     //       to validate Hudi is handling this case appropriately
     var writeOpts = options -- Seq(DataSourceWriteOptions.RECORDKEY_FIELD.key)
 
@@ -264,14 +264,16 @@ class TestAutoGenerationOfRecordKeys extends HoodieSparkClientTestBase with Scal
     assertEquals(5, snapshot0.count())
   }
 
-  @Test
-  def testUpsertsAndDeletesWithPkLess(): Unit = {
+  @ParameterizedTest
+  @EnumSource(value = classOf[HoodieTableType])
+  def testUpsertsAndDeletesWithPkLess(tableType: HoodieTableType): Unit = {
     val (vanillaWriteOpts, readOpts) = getWriterReaderOpts(HoodieRecordType.AVRO)
 
-    var options: Map[String, String] = vanillaWriteOpts ++ Map(
-      DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> classOf[SimpleKeyGenerator].getCanonicalName)
+    val options: Map[String, String] = vanillaWriteOpts ++ Map(
+      DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> classOf[SimpleKeyGenerator].getCanonicalName,
+      DataSourceWriteOptions.TABLE_TYPE.key -> tableType.name())
 
-    var writeOpts = options -- Seq(DataSourceWriteOptions.RECORDKEY_FIELD.key)
+    val writeOpts = options -- Seq(DataSourceWriteOptions.RECORDKEY_FIELD.key)
 
     // Insert Operation
     val records = recordsToStrings(dataGen.generateInserts("000", 20)).asScala.toList

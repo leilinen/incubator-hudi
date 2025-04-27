@@ -21,7 +21,6 @@ package org.apache.hudi.connect.writers;
 import org.apache.hudi.client.HoodieJavaWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieJavaEngineContext;
-import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
@@ -72,12 +71,12 @@ public class KafkaConnectWriterProvider implements ConnectWriterProvider<WriteSt
         KafkaConnectUtils.getDefaultStorageConf(connectConfigs);
 
     try {
-      this.schemaProvider = StringUtils.isNullOrEmpty(connectConfigs.getSchemaProviderClass()) ? null
-          : (SchemaProvider) ReflectionUtils.loadClass(connectConfigs.getSchemaProviderClass(),
-          new TypedProperties(connectConfigs.getProps()));
+      this.schemaProvider = StringUtils.isNullOrEmpty(connectConfigs.getSchemaProviderClass()) ? null :
+          (SchemaProvider) ReflectionUtils.loadClass(
+              connectConfigs.getSchemaProviderClass(), connectConfigs.getProps());
 
       this.keyGenerator = HoodieAvroKeyGeneratorFactory.createKeyGenerator(
-          new TypedProperties(connectConfigs.getProps()));
+          connectConfigs.getProps());
 
       // This is the writeConfig for the writers for the individual Transaction Coordinators
       writeConfig = HoodieWriteConfig.newBuilder()

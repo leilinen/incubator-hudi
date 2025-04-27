@@ -41,10 +41,13 @@ import org.apache.hadoop.io.BooleanWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Properties;
+
+import static org.apache.hudi.common.util.StringUtils.isNullOrEmpty;
 
 /**
  * {@link HoodieRecord} implementation for Hive records of {@link ArrayWritable}.
@@ -101,11 +104,10 @@ public class HoodieHiveRecord extends HoodieRecord<ArrayWritable> {
   @Override
   public Comparable<?> getOrderingValue(Schema recordSchema, Properties props) {
     String orderingField = ConfigUtils.getOrderingField(props);
-    if (orderingField == null) {
-      return 0;
-      //throw new IllegalArgumentException("Ordering Field is not set. Precombine must be set. (If you are using a custom record merger it might be something else)");
+    if (isNullOrEmpty(orderingField)) {
+      return DEFAULT_ORDERING_VALUE;
     }
-    return (Comparable<?>) getValue(ConfigUtils.getOrderingField(props));
+    return (Comparable<?>) getValue(orderingField);
   }
 
   @Override
@@ -140,6 +142,11 @@ public class HoodieHiveRecord extends HoodieRecord<ArrayWritable> {
       objects[i] = getValue(columns[i]);
     }
     return objects;
+  }
+
+  @Override
+  public Object getColumnValueAsJava(Schema recordSchema, String column, Properties props) {
+    throw new UnsupportedOperationException("Unsupported yet for " + this.getClass().getSimpleName());
   }
 
   @Override
@@ -208,6 +215,11 @@ public class HoodieHiveRecord extends HoodieRecord<ArrayWritable> {
 
   @Override
   public Option<HoodieAvroIndexedRecord> toIndexedRecord(Schema recordSchema, Properties props) throws IOException {
+    throw new UnsupportedOperationException("Not supported for HoodieHiveRecord");
+  }
+
+  @Override
+  public ByteArrayOutputStream getAvroBytes(Schema recordSchema, Properties props) throws IOException {
     throw new UnsupportedOperationException("Not supported for HoodieHiveRecord");
   }
 

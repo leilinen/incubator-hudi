@@ -171,7 +171,6 @@ public class TestJavaCopyOnWriteActionExecutor extends HoodieJavaClientTestHarne
     GenericRecord newRecord;
     int index = 0;
     for (GenericRecord record : fileRecords) {
-      //System.out.println("Got :" + record.get("_row_key").toString() + ", Exp :" + records.get(index).getRecordKey());
       assertEquals(records.get(index).getRecordKey(), record.get("_row_key").toString());
       index++;
     }
@@ -434,7 +433,7 @@ public class TestJavaCopyOnWriteActionExecutor extends HoodieJavaClientTestHarne
     WriteStatus writeStatus = ws.get(0).get(0);
     String fileId = writeStatus.getFileId();
     metaClient.getStorage()
-        .create(new StoragePath(Paths.get(basePath, ".hoodie", "000.commit").toString()))
+        .create(new StoragePath(Paths.get(basePath, ".hoodie/timeline", "000.commit").toString()))
         .close();
     //TODO : Find race condition that causes the timeline sometime to reflect 000.commit and sometimes not
     final HoodieJavaCopyOnWriteTable reloadedTable = (HoodieJavaCopyOnWriteTable) HoodieJavaTable.create(config, context, HoodieTableMetaClient.reload(metaClient));

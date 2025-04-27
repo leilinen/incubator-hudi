@@ -34,6 +34,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
@@ -102,6 +103,9 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
       boolean created = false;
       while (!created) {
         try {
+          if (storage.exists(logFile.getPath())) {
+            rollOver();
+          }
           // Block size does not matter as we will always manually auto-flush
           createNewFile();
           LOG.info("Created a new log file: {}", logFile);
@@ -146,14 +150,14 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
       outputStream.write(HoodieLogFormat.MAGIC);
 
       // bytes for header
-      byte[] headerBytes = HoodieLogBlock.getLogMetadataBytes(block.getLogBlockHeader());
+      byte[] headerBytes = HoodieLogBlock.getHeaderMetadataBytes(block.getLogBlockHeader());
       // content bytes
-      byte[] content = block.getContentBytes(storage);
+      ByteArrayOutputStream content = block.getContentBytes(storage);
       // bytes for footer
-      byte[] footerBytes = HoodieLogBlock.getLogMetadataBytes(block.getLogBlockFooter());
+      byte[] footerBytes = HoodieLogBlock.getFooterMetadataBytes(block.getLogBlockFooter());
 
       // 2. Write the total size of the block (excluding Magic)
-      outputStream.writeLong(getLogBlockLength(content.length, headerBytes.length, footerBytes.length));
+      outputStream.writeLong(getLogBlockLength(content.size(), headerBytes.length, footerBytes.length));
 
       // 3. Write the version of this log block
       outputStream.writeInt(currentLogFormatVersion.getVersion());
@@ -163,9 +167,9 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
       // 5. Write the headers for the log block
       outputStream.write(headerBytes);
       // 6. Write the size of the content block
-      outputStream.writeLong(content.length);
+      outputStream.writeLong(content.size());
       // 7. Write the contents of the data block
-      outputStream.write(content);
+      content.writeTo(outputStream);
       // 8. Write the footers for the log block
       outputStream.write(footerBytes);
       // 9. Write the total size of the log block (including magic) which is everything written
@@ -198,13 +202,13 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
    * content 6. Length of the footers 7. Number of bytes to write totalLogBlockLength
    */
   private int getLogBlockLength(int contentLength, int headerLength, int footerLength) {
-    return Integer.BYTES + // Number of bytes to write version
-        Integer.BYTES + // Number of bytes to write ordinal
-        headerLength + // Length of the headers
-        Long.BYTES + // Number of bytes used to write content length
-        contentLength + // Length of the content
-        footerLength + // Length of the footers
-        Long.BYTES; // bytes to write totalLogBlockLength at end of block (for reverse ptr)
+    return Integer.BYTES // Number of bytes to write version
+        + Integer.BYTES // Number of bytes to write ordinal
+        + headerLength // Length of the headers
+        + Long.BYTES // Number of bytes used to write content length
+        + contentLength // Length of the content
+        + footerLength // Length of the footers
+        + Long.BYTES; // bytes to write totalLogBlockLength at end of block (for reverse ptr)
   }
 
   private void rolloverIfNeeded() throws IOException {
@@ -217,7 +221,7 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
 
   private void rollOver() throws IOException {
     closeStream();
-    this.logFile = logFile.rollOver(storage, rolloverLogWriteToken);
+    this.logFile = logFile.rollOver(rolloverLogWriteToken);
     this.closed = false;
   }
 
@@ -231,10 +235,11 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
 
   @Override
   public void close() throws IOException {
+    closeStream();
+    // remove the shutdown hook after closing the stream to avoid memory leaks
     if (null != shutdownThread) {
       Runtime.getRuntime().removeShutdownHook(shutdownThread);
     }
-    closeStream();
   }
 
   private void closeStream() throws IOException {
@@ -275,12 +280,10 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
     shutdownThread = new Thread() {
       public void run() {
         try {
-          LOG.warn("running logformatwriter hook");
-          if (output != null) {
-            closeStream();
-          }
+          LOG.warn("running HoodieLogFormatWriter shutdown hook to close output stream for log file: {}", logFile);
+          closeStream();
         } catch (Exception e) {
-          LOG.warn(String.format("unable to close output stream for log file %s", logFile), e);
+          LOG.warn("unable to close output stream for log file: {}", logFile, e);
           // fail silently for any sort of exception
         }
       }

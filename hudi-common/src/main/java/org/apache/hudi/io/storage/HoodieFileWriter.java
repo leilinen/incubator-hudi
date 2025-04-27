@@ -18,10 +18,10 @@
 
 package org.apache.hudi.io.storage;
 
-import org.apache.avro.Schema;
-
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
+
+import org.apache.avro.Schema;
 
 import java.io.IOException;
 import java.util.Properties;
@@ -41,5 +41,13 @@ public interface HoodieFileWriter extends AutoCloseable {
 
   default void write(String recordKey, HoodieRecord record, Schema schema) throws IOException {
     write(recordKey, record, schema, new Properties());
+  }
+
+  /**
+   * Return metadata from the underlying format file, for example, return {@code ParquetMetadata} for Parquet files.
+   * The returned format metadata will be used to generate column statistics, like {@code HoodieColumnRangeMetadata}.
+   */
+  default Object getFileFormatMetadata() {
+    throw new UnsupportedOperationException("HoodieFileWriter#getFormatMetadata is unsupported by default.");
   }
 }

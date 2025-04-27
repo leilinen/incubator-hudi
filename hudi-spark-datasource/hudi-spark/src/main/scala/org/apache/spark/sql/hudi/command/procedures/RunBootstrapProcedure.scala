@@ -36,6 +36,7 @@ import java.util.Locale
 import java.util.function.Supplier
 
 import scala.collection.JavaConverters._
+
 class RunBootstrapProcedure extends BaseProcedure with ProcedureBuilder with Logging {
   private val PARAMETERS = Array[ProcedureParameter](
     ProcedureParameter.required(0, "table", DataTypes.StringType),

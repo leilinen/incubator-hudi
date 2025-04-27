@@ -27,12 +27,14 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
+import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieIndexConfig;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.exception.HoodieCatalogException;
 import org.apache.hudi.exception.HoodieMetadataException;
+import org.apache.hudi.exception.HoodieValidationException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils;
 import org.apache.hudi.keygen.NonpartitionedAvroKeyGenerator;
@@ -101,7 +103,12 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
+import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
+import static org.apache.flink.util.StringUtils.isNullOrWhitespaceOnly;
 import static org.apache.hudi.adapter.HiveCatalogConstants.ALTER_DATABASE_OP;
 import static org.apache.hudi.adapter.HiveCatalogConstants.DATABASE_LOCATION_URI;
 import static org.apache.hudi.adapter.HiveCatalogConstants.DATABASE_OWNER_NAME;
@@ -112,10 +119,6 @@ import static org.apache.hudi.configuration.FlinkOptions.PATH;
 import static org.apache.hudi.table.catalog.TableOptionProperties.COMMENT;
 import static org.apache.hudi.table.catalog.TableOptionProperties.PK_CONSTRAINT_NAME;
 import static org.apache.hudi.table.catalog.TableOptionProperties.SPARK_SOURCE_PROVIDER;
-import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
-import static org.apache.flink.util.StringUtils.isNullOrWhitespaceOnly;
 
 /**
  * A catalog implementation for Hoodie based on MetaStore.
@@ -357,7 +360,7 @@ public class HoodieHiveCatalog extends AbstractCatalog {
   private Table isHoodieTable(Table hiveTable) {
     if (!hiveTable.getParameters().getOrDefault(SPARK_SOURCE_PROVIDER, "").equalsIgnoreCase("hudi")
         && !isFlinkHoodieTable(hiveTable)) {
-      throw new HoodieCatalogException(String.format("the %s is not hoodie table", hiveTable.getTableName()));
+      throw new HoodieCatalogException(String.format("Table %s is not a hoodie table", hiveTable.getTableName()));
     }
     return hiveTable;
   }
@@ -374,7 +377,7 @@ public class HoodieHiveCatalog extends AbstractCatalog {
     } catch (NoSuchObjectException e) {
       throw new TableNotExistException(getName(), tablePath);
     } catch (TException e) {
-      throw new HoodieCatalogException(String.format("Failed to get table %s from Hive metastore", tablePath.getObjectName()));
+      throw new HoodieCatalogException(String.format("Failed to get table %s from Hive metastore", tablePath.getObjectName()), e);
     }
   }
 
@@ -464,13 +467,17 @@ public class HoodieHiveCatalog extends AbstractCatalog {
       throw new HoodieCatalogException("CREATE VIEW is not supported.");
     }
 
+    // validate parameter consistency
+    validateParameterConsistency(table);
+
     try {
       boolean isMorTable = OptionsResolver.isMorTable(table.getOptions());
       Table hiveTable = instantiateHiveTable(tablePath, table, inferTablePath(tablePath, table), isMorTable);
       //create hive table
       client.createTable(hiveTable);
       //init hoodie metaClient
-      initTableIfNotExists(tablePath, (CatalogTable) table);
+      HoodieTableMetaClient metaClient = initTableIfNotExists(tablePath, (CatalogTable) table);
+      HoodieCatalogUtil.initPartitionBucketIndexMeta(metaClient, table);
     } catch (AlreadyExistsException e) {
       if (!ignoreIfExists) {
         throw new TableAlreadyExistException(getName(), tablePath, e);
@@ -481,7 +488,7 @@ public class HoodieHiveCatalog extends AbstractCatalog {
     }
   }
 
-  private void initTableIfNotExists(ObjectPath tablePath, CatalogTable catalogTable) {
+  private HoodieTableMetaClient initTableIfNotExists(ObjectPath tablePath, CatalogTable catalogTable) {
     Configuration flinkConf = Configuration.fromMap(catalogTable.getOptions());
     final String avroSchema = AvroSchemaConverter.convertToSchema(
         catalogTable.getSchema().toPersistedRowDataType().getLogicalType(),
@@ -523,7 +530,7 @@ public class HoodieHiveCatalog extends AbstractCatalog {
     StreamerUtil.checkPreCombineKey(flinkConf, fields);
 
     try {
-      StreamerUtil.initTableIfNotExists(flinkConf, hiveConf);
+      return StreamerUtil.initTableIfNotExists(flinkConf, hiveConf);
     } catch (IOException e) {
       throw new HoodieCatalogException("Initialize table exception.", e);
     }
@@ -599,6 +606,10 @@ public class HoodieHiveCatalog extends AbstractCatalog {
       Pair<List<FieldSchema>, List<FieldSchema>> splitSchemas = HiveSchemaUtils.splitSchemaByPartitionKeys(allColumns, partitionKeys);
       List<FieldSchema> regularColumns = splitSchemas.getLeft();
       List<FieldSchema> partitionColumns = splitSchemas.getRight();
+
+      String hivePartitionKeys = partitionColumns.stream().map(FieldSchema::getName).collect(Collectors.joining(","));
+      ValidationUtils.checkArgument(hivePartitionKeys.equals(String.join(",", partitionKeys)),
+          String.format("The order of regular fields(%s) and partition fields(%s) needs to be consistent", hivePartitionKeys, String.join(",", partitionKeys)));
 
       sd.setCols(regularColumns);
       hiveTable.setPartitionKeys(partitionColumns);
@@ -718,7 +729,7 @@ public class HoodieHiveCatalog extends AbstractCatalog {
           HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setBasePath(location)
               .setConf(HadoopFSUtils.getStorageConfWithCopy(hiveConf)).build();
           //Init table with new name
-          HoodieTableMetaClient.withPropertyBuilder().fromProperties(metaClient.getTableConfig().getProps())
+          HoodieTableMetaClient.newTableBuilder().fromProperties(metaClient.getTableConfig().getProps())
               .setTableName(newTableName)
               .initTable(HadoopFSUtils.getStorageConfWithCopy(hiveConf), location);
 
@@ -975,6 +986,44 @@ public class HoodieHiveCatalog extends AbstractCatalog {
       newOptions.computeIfAbsent(FlinkOptions.HIVE_SYNC_DB.key(), k -> tablePath.getDatabaseName());
       newOptions.computeIfAbsent(FlinkOptions.HIVE_SYNC_TABLE.key(), k -> tablePath.getObjectName());
       return newOptions;
+    }
+  }
+
+  public void validateParameterConsistency(CatalogBaseTable table) {
+    Map<String, String> properties = new HashMap<>(table.getOptions());
+
+    //Check consistency between pk statement and option 'hoodie.datasource.write.recordkey.field'.
+    String pkError = String.format("Primary key fields definition has inconsistency between pk statement and option '%s'",
+        FlinkOptions.RECORD_KEY_FIELD.key());
+    if (table.getUnresolvedSchema().getPrimaryKey().isPresent()
+        && properties.containsKey(FlinkOptions.RECORD_KEY_FIELD.key())) {
+      List<String> pks = table.getUnresolvedSchema().getPrimaryKey().get().getColumnNames();
+      String[] pkFromOptions = properties.get(FlinkOptions.RECORD_KEY_FIELD.key()).split(",");
+      if (pkFromOptions.length != pks.size()) {
+        throw new HoodieValidationException(pkError);
+      }
+      for (String field : pkFromOptions) {
+        if (!pks.contains(field)) {
+          throw new HoodieValidationException(pkError);
+        }
+      }
+    }
+
+    //Check consistency between partition key statement and option 'hoodie.datasource.write.partitionpath.field'.
+    String partitionKeyError = String.format("Partition key fields definition has inconsistency between partition key statement and option '%s'",
+        FlinkOptions.PARTITION_PATH_FIELD.key());
+    CatalogTable catalogTable = (CatalogTable) table;
+    if (catalogTable.isPartitioned() && properties.containsKey(FlinkOptions.PARTITION_PATH_FIELD.key())) {
+      final List<String> partitions = catalogTable.getPartitionKeys();
+      final String[] partitionsFromOptions = properties.get(FlinkOptions.PARTITION_PATH_FIELD.key()).split(",");
+      if (partitionsFromOptions.length != partitions.size()) {
+        throw new HoodieValidationException(pkError);
+      }
+      for (String field : partitionsFromOptions) {
+        if (!partitions.contains(field)) {
+          throw new HoodieValidationException(partitionKeyError);
+        }
+      }
     }
   }
 

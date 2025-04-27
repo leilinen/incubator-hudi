@@ -18,16 +18,16 @@
 
 package org.apache.hudi.utils;
 
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
-
 import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeAllCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +43,7 @@ public class FlinkMiniCluster implements BeforeAllCallback, AfterAllCallback, Af
   private static final MiniClusterWithClientResource MINI_CLUSTER_RESOURCE =
       new MiniClusterWithClientResource(
           new MiniClusterResourceConfiguration.Builder()
+              .setConfiguration(getDefaultConfig())
               .setNumberTaskManagers(1)
               .setNumberSlotsPerTaskManager(DEFAULT_PARALLELISM)
               .build());
@@ -60,6 +61,14 @@ public class FlinkMiniCluster implements BeforeAllCallback, AfterAllCallback, Af
   @Override
   public void afterEach(ExtensionContext context) throws Exception {
     cleanupRunningJobs();
+  }
+
+  private static Configuration getDefaultConfig() {
+    Configuration config = new Configuration();
+    // flink job uses child-first classloader by default, async services fired by flink job are not
+    // guaranteed to be killed right away, which then may trigger classloader leak checking exception.
+    config.set(CoreOptions.CHECK_LEAKED_CLASSLOADER, false);
+    return config;
   }
 
   private void cleanupRunningJobs() throws Exception {

@@ -23,8 +23,8 @@ import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.config.HoodieCleanConfig;
@@ -70,7 +70,7 @@ public class HoodieClusteringJob {
     this.props.put(HoodieCleanConfig.ASYNC_CLEAN.key(), false);
     if (this.metaClient.getTableConfig().isMetadataTableAvailable()) {
       // add default lock config options if MDT is enabled.
-      UtilHelpers.addLockOptions(cfg.basePath, this.props);
+      UtilHelpers.addLockOptions(cfg.basePath, this.metaClient.getBasePath().toUri().getScheme(), this.props);
     }
   }
 
@@ -92,10 +92,10 @@ public class HoodieClusteringJob {
     public String sparkMemory = null;
     @Parameter(names = {"--retry", "-rt"}, description = "number of retries")
     public int retry = 0;
-    @Parameter(names = {"--skip-clean", "-sc"}, description = "do not trigger clean after compaction", required = false)
+    @Parameter(names = {"--skip-clean", "-sc"}, description = "do not trigger clean after clustering", required = false)
     public Boolean skipClean = true;
 
-    @Parameter(names = {"--schedule", "-sc"}, description = "Schedule clustering @desperate soon please use \"--mode schedule\" instead")
+    @Parameter(names = {"--schedule", "-sch"}, description = "Schedule clustering @desperate soon please use \"--mode schedule\" instead")
     public Boolean runSchedule = false;
 
     @Parameter(names = {"--retry-last-failed-clustering-job", "-rc"}, description = "Take effect when using --mode/-m scheduleAndExecute. Set true means "
@@ -217,7 +217,7 @@ public class HoodieClusteringJob {
         Option<HoodieInstant> firstClusteringInstant =
             metaClient.getActiveTimeline().getFirstPendingClusterInstant();
         if (firstClusteringInstant.isPresent()) {
-          cfg.clusteringInstantTime = firstClusteringInstant.get().getTimestamp();
+          cfg.clusteringInstantTime = firstClusteringInstant.get().requestedTime();
           LOG.info("Found the earliest scheduled clustering instant which will be executed: "
               + cfg.clusteringInstantTime);
         } else {
@@ -261,15 +261,16 @@ public class HoodieClusteringJob {
 
       if (cfg.retryLastFailedClusteringJob) {
         HoodieSparkTable<HoodieRecordPayload> table = HoodieSparkTable.create(client.getConfig(), client.getEngineContext());
+        client.validateAgainstTableProperties(table.getMetaClient().getTableConfig(), client.getConfig());
         Option<HoodieInstant> lastClusterOpt = table.getActiveTimeline().getLastPendingClusterInstant();
 
         if (lastClusterOpt.isPresent()) {
           HoodieInstant inflightClusteringInstant = lastClusterOpt.get();
-          Date clusteringStartTime = HoodieActiveTimeline.parseDateFromInstantTime(inflightClusteringInstant.getTimestamp());
+          Date clusteringStartTime = TimelineUtils.parseDateFromInstantTime(inflightClusteringInstant.requestedTime());
           if (clusteringStartTime.getTime() + cfg.maxProcessingTimeMs < System.currentTimeMillis()) {
             // if there has failed clustering, then we will use the failed clustering instant-time to trigger next clustering action which will rollback and clustering.
             LOG.info("Found failed clustering instant at : " + inflightClusteringInstant + "; Will rollback the failed clustering and re-trigger again.");
-            instantTime = Option.of(inflightClusteringInstant.getTimestamp());
+            instantTime = Option.of(inflightClusteringInstant.requestedTime());
           } else {
             LOG.info(inflightClusteringInstant + " might still be in progress, will trigger a new clustering job.");
           }

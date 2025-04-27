@@ -24,24 +24,26 @@ import org.apache.hudi.common.HoodieSchemaNotFoundException
 import org.apache.hudi.common.config.{HoodieReaderConfig, HoodieStorageConfig}
 import org.apache.hudi.common.model.HoodieTableType.{COPY_ON_WRITE, MERGE_ON_READ}
 import org.apache.hudi.common.model.WriteConcurrencyMode
-import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
-import org.apache.hudi.common.util.ConfigUtils
+import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, HoodieTableVersion, TableSchemaResolver}
+import org.apache.hudi.common.table.log.InstantRange.RangeType
+import org.apache.hudi.common.util.{ConfigUtils, TablePathUtils}
 import org.apache.hudi.common.util.ValidationUtils.checkState
 import org.apache.hudi.config.HoodieBootstrapConfig.DATA_QUERIES_ONLY
-import org.apache.hudi.config.HoodieWriteConfig.WRITE_CONCURRENCY_MODE
+import org.apache.hudi.config.HoodieWriteConfig.{WRITE_CONCURRENCY_MODE, WRITE_TABLE_VERSION}
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.io.storage.HoodieSparkIOFactory
 import org.apache.hudi.storage.{HoodieStorageUtils, StoragePath}
-import org.apache.hudi.util.PathUtils
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage
+import org.apache.hudi.util.{PathUtils, SparkConfigUtils}
 
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession, SQLContext}
 import org.apache.spark.sql.execution.streaming.{Sink, Source}
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.isUsingHiveCatalog
-import org.apache.spark.sql.hudi.streaming.{HoodieEarliestOffsetRangeLimit, HoodieLatestOffsetRangeLimit, HoodieSpecifiedOffsetRangeLimit, HoodieStreamSource}
+import org.apache.spark.sql.hudi.streaming.{HoodieEarliestOffsetRangeLimit, HoodieLatestOffsetRangeLimit, HoodieSpecifiedOffsetRangeLimit, HoodieStreamSourceV1, HoodieStreamSourceV2}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.streaming.OutputMode
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, SQLContext, SaveMode, SparkSession}
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -132,7 +134,14 @@ class DefaultSource extends RelationProvider
       .setConf(storage.getConf.newInstance())
       .setBasePath(tablePath).build()
 
-    DefaultSource.createRelation(sqlContext, metaClient, schema, globPaths, parameters.toMap)
+    // Add preCombineField to options for buildReaderWithPartitionValues properly
+    val options = if (metaClient.getTableConfig.getPreCombineField != null) {
+      parameters ++ Map(HoodieTableConfig.PRECOMBINE_FIELD.key -> metaClient.getTableConfig.getPreCombineField)
+    } else {
+      parameters
+    }
+
+    DefaultSource.createRelation(sqlContext, metaClient, schema, globPaths, options.toMap)
   }
 
   /**
@@ -225,7 +234,38 @@ class DefaultSource extends RelationProvider
         HoodieSpecifiedOffsetRangeLimit(instantTime)
     }
 
-    new HoodieStreamSource(sqlContext, metadataPath, schema, parameters, offsetRangeLimit)
+    val storageConf = HadoopFSUtils.getStorageConf(sqlContext.sparkSession.sessionState.newHadoopConf())
+    val tablePath: StoragePath = {
+      val path = new StoragePath(parameters.getOrElse("path", "Missing 'path' option"))
+      val fs = new HoodieHadoopStorage(path, storageConf)
+      TablePathUtils.getTablePath(fs, path).get()
+    }
+    val metaClient = HoodieTableMetaClient.builder()
+      .setConf(storageConf.newInstance()).setBasePath(tablePath.toString).build()
+    // Check if the streaming table read version is set. If set, use the corresponding source
+    // which uses the version corresponding to IncrementalRelation to read the data. And, also
+    // does the checkpoint management based on the version.
+    val targetTableVersion: Integer = Integer.parseInt(
+      parameters.getOrElse(WRITE_TABLE_VERSION.key, WRITE_TABLE_VERSION.defaultValue.toString))
+    if (SparkConfigUtils.containsConfigProperty(parameters, STREAMING_READ_TABLE_VERSION)) {
+      val sourceTableVersion = Integer.parseInt(parameters(STREAMING_READ_TABLE_VERSION.key))
+      if (sourceTableVersion >= HoodieTableVersion.EIGHT.versionCode()) {
+        new HoodieStreamSourceV2(
+          sqlContext, metaClient, metadataPath, schema, parameters, offsetRangeLimit, HoodieTableVersion.fromVersionCode(targetTableVersion))
+      } else {
+        new HoodieStreamSourceV1(
+          sqlContext, metaClient, metadataPath, schema, parameters, offsetRangeLimit, HoodieTableVersion.fromVersionCode(targetTableVersion))
+      }
+    } else {
+      val sourceTableVersion = metaClient.getTableConfig.getTableVersion.versionCode()
+      if (sourceTableVersion >= HoodieTableVersion.EIGHT.versionCode()) {
+        new HoodieStreamSourceV2(
+          sqlContext, metaClient, metadataPath, schema, parameters, offsetRangeLimit, HoodieTableVersion.fromVersionCode(targetTableVersion))
+      } else {
+        new HoodieStreamSourceV1(
+          sqlContext, metaClient, metadataPath, schema, parameters, offsetRangeLimit, HoodieTableVersion.fromVersionCode(targetTableVersion))
+      }
+    }
   }
 }
 
@@ -240,11 +280,9 @@ object DefaultSource {
                      parameters: Map[String, String]): BaseRelation = {
     val tableType = metaClient.getTableType
     val isBootstrappedTable = metaClient.getTableConfig.getBootstrapBasePath.isPresent
-    val queryType = parameters(QUERY_TYPE.key)
+    val queryType = SparkConfigUtils.getStringWithAltKeys(parameters, QUERY_TYPE)
     val isCdcQuery = queryType == QUERY_TYPE_INCREMENTAL_OPT_VAL &&
       parameters.get(INCREMENTAL_FORMAT.key).contains(INCREMENTAL_FORMAT_CDC_VAL)
-    val isMultipleBaseFileFormatsEnabled = metaClient.getTableConfig.isMultipleBaseFileFormatsEnabled
-
 
     val createTimeLineRln = parameters.get(DataSourceReadOptions.CREATE_TIMELINE_RELATION.key())
     val createFSRln = parameters.get(DataSourceReadOptions.CREATE_FILESYSTEM_RELATION.key())
@@ -268,8 +306,7 @@ object DefaultSource {
 
       val useNewParquetFileFormat = parameters.getOrElse(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(),
         HoodieReaderConfig.FILE_GROUP_READER_ENABLED.defaultValue().toString).toBoolean &&
-        !metaClient.isMetadataTable && (globPaths == null || globPaths.isEmpty) &&
-        parameters.getOrElse(REALTIME_MERGE.key(), REALTIME_MERGE.defaultValue()).equalsIgnoreCase(REALTIME_PAYLOAD_COMBINE_OPT_VAL)
+        !metaClient.isMetadataTable && (globPaths == null || globPaths.isEmpty)
       if (metaClient.getCommitsTimeline.filterCompletedInstants.countInstants() == 0) {
         new EmptyRelation(sqlContext, resolveSchema(metaClient, parameters, Some(schema)))
       } else if (isCdcQuery) {
@@ -297,11 +334,29 @@ object DefaultSource {
               resolveBaseFileOnlyRelation(sqlContext, globPaths, userSchema, metaClient, parameters)
             }
           case (COPY_ON_WRITE, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
-            if (useNewParquetFileFormat) {
-              new HoodieCopyOnWriteIncrementalHadoopFsRelationFactory(
-                sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+            if (SparkConfigUtils.containsConfigProperty(parameters, INCREMENTAL_READ_TABLE_VERSION)) {
+              val writeTableVersion = Integer.parseInt(parameters(INCREMENTAL_READ_TABLE_VERSION.key))
+              if (writeTableVersion >= HoodieTableVersion.EIGHT.versionCode()) {
+                if (useNewParquetFileFormat) {
+                  new HoodieCopyOnWriteIncrementalHadoopFsRelationFactory(
+                    sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+                } else {
+                  new IncrementalRelationV2(sqlContext, parameters, userSchema, metaClient, RangeType.CLOSED_CLOSED)
+                }
+              } else {
+                new IncrementalRelationV1(sqlContext, parameters, userSchema, metaClient)
+              }
             } else {
-              new IncrementalRelation(sqlContext, parameters, userSchema, metaClient)
+              if (metaClient.getTableConfig.getTableVersion.versionCode() >= HoodieTableVersion.EIGHT.versionCode()) {
+                if (useNewParquetFileFormat) {
+                  new HoodieCopyOnWriteIncrementalHadoopFsRelationFactory(
+                    sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+                } else {
+                  new IncrementalRelationV2(sqlContext, parameters, userSchema, metaClient, RangeType.CLOSED_CLOSED)
+                }
+              } else {
+                new IncrementalRelationV1(sqlContext, parameters, userSchema, metaClient)
+              }
             }
 
           case (MERGE_ON_READ, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) =>
@@ -321,11 +376,29 @@ object DefaultSource {
             }
 
           case (MERGE_ON_READ, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
-            if (useNewParquetFileFormat) {
-              new HoodieMergeOnReadIncrementalHadoopFsRelationFactory(
-                sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+            if (SparkConfigUtils.containsConfigProperty(parameters, INCREMENTAL_READ_TABLE_VERSION)) {
+              val writeTableVersion = Integer.parseInt(parameters(INCREMENTAL_READ_TABLE_VERSION.key))
+              if (writeTableVersion >= HoodieTableVersion.EIGHT.versionCode()) {
+                if (useNewParquetFileFormat) {
+                  new HoodieMergeOnReadIncrementalHadoopFsRelationFactory(
+                    sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+                } else {
+                  MergeOnReadIncrementalRelationV2(sqlContext, parameters, metaClient, userSchema)
+                }
+              } else {
+                MergeOnReadIncrementalRelationV1(sqlContext, parameters, metaClient, userSchema)
+              }
             } else {
-              MergeOnReadIncrementalRelation(sqlContext, parameters, metaClient, userSchema)
+              if (metaClient.getTableConfig.getTableVersion.versionCode() >= HoodieTableVersion.EIGHT.versionCode()) {
+                if (useNewParquetFileFormat) {
+                  new HoodieMergeOnReadIncrementalHadoopFsRelationFactory(
+                    sqlContext, metaClient, parameters, userSchema, isBootstrappedTable).build()
+                } else {
+                  MergeOnReadIncrementalRelationV2(sqlContext, parameters, metaClient, userSchema)
+                }
+              } else {
+                MergeOnReadIncrementalRelationV1(sqlContext, parameters, metaClient, userSchema)
+              }
             }
 
           case (_, _, true) =>

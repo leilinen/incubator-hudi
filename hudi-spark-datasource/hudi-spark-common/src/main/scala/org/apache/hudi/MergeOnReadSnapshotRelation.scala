@@ -112,7 +112,7 @@ abstract class BaseMergeOnReadSnapshotRelation(sqlContext: SQLContext,
     val optionalFilters = filters
     val readers = createBaseFileReaders(tableSchema, requiredSchema, requestedColumns, requiredFilters, optionalFilters)
 
-    new HoodieMergeOnReadRDD(
+    new HoodieMergeOnReadRDDV2(
       sqlContext.sparkContext,
       config = jobConf,
       fileReaders = readers,

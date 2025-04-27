@@ -260,12 +260,12 @@ public class HoodieJavaStreamingApp {
     while ((currTime - beginTime) < timeoutMsecs) {
       try {
         HoodieTimeline timeline = HoodieDataSourceHelpers.allCompletedCommitsCompactions(fs, tablePath);
-        LOG.info("Timeline :" + timeline.getInstants());
+        LOG.info("Timeline :{}", timeline.getInstants());
         if (timeline.countInstants() >= numCommits) {
           return;
         }
         HoodieTableMetaClient metaClient = createMetaClient(new HadoopStorageConfiguration(fs.getConf()), tablePath);
-        System.out.println("Instants :" + metaClient.getActiveTimeline().getInstants());
+        LOG.info("Instants :{}", metaClient.getActiveTimeline().getInstants());
       } catch (TableNotFoundException te) {
         LOG.info("Got table not found exception. Retrying");
       } finally {
@@ -321,17 +321,14 @@ public class HoodieJavaStreamingApp {
     /**
      * Read & do some queries
      */
-    Dataset<Row> hoodieROViewDF = spark.read().format("hudi")
-        // pass any path glob, can include hoodie & non-hoodie
-        // datasets
-        .load(tablePath + "/*/*/*/*");
+    Dataset<Row> hoodieROViewDF = spark.read().format("hudi").load(tablePath);
     hoodieROViewDF.registerTempTable("hoodie_ro");
     spark.sql("describe hoodie_ro").show();
     // all trips whose fare amount was greater than 2.
     spark.sql("select fare.amount, begin_lon, begin_lat, timestamp from hoodie_ro where fare.amount > 2.0").show();
 
     if (instantTimeValidation) {
-      System.out.println("Showing all records. Latest Instant Time =" + commitInstantTime2);
+      LOG.info("Showing all records. Latest Instant Time ={}", commitInstantTime2);
       spark.sql("select * from hoodie_ro").show(200, false);
       long numRecordsAtInstant2 =
           spark.sql("select * from hoodie_ro where _hoodie_commit_time = " + commitInstantTime2).count();
@@ -350,7 +347,7 @@ public class HoodieJavaStreamingApp {
       Dataset<Row> hoodieIncViewDF = spark.read().format("hudi")
           .option(DataSourceReadOptions.QUERY_TYPE().key(), DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL())
           // Only changes in write 2 above
-          .option(DataSourceReadOptions.BEGIN_INSTANTTIME().key(), commitInstantTime1)
+          .option(DataSourceReadOptions.START_COMMIT().key(), commitInstantTime1)
           // For incremental view, pass in the root/base path of dataset
           .load(tablePath);
 

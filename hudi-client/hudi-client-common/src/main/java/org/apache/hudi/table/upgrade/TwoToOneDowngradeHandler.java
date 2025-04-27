@@ -27,6 +27,7 @@ import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.storage.HoodieStorage;
@@ -52,25 +53,25 @@ import static org.apache.hudi.common.util.MarkerUtils.MARKERS_FILENAME_PREFIX;
 public class TwoToOneDowngradeHandler implements DowngradeHandler {
 
   @Override
-  public Map<ConfigProperty, String> downgrade(
+  public Pair<Map<ConfigProperty, String>, List<ConfigProperty>> downgrade(
       HoodieWriteConfig config, HoodieEngineContext context, String instantTime,
       SupportsUpgradeDowngrade upgradeDowngradeHelper) {
     HoodieTable table = upgradeDowngradeHelper.getTable(config, context);
     HoodieTableMetaClient metaClient = table.getMetaClient();
 
     // re-create marker files if any partial timeline server based markers are found
-    HoodieTimeline inflightTimeline = metaClient.getCommitsTimeline().filterPendingExcludingMajorAndMinorCompaction();
+    HoodieTimeline inflightTimeline = metaClient.getCommitsTimeline().filterPendingExcludingCompactionAndLogCompaction();
     List<HoodieInstant> commits = inflightTimeline.getReverseOrderedInstants().collect(Collectors.toList());
     for (HoodieInstant inflightInstant : commits) {
       // Converts the markers in new format to old format of direct markers
       try {
         convertToDirectMarkers(
-            inflightInstant.getTimestamp(), table, context, config.getMarkersDeleteParallelism());
+            inflightInstant.requestedTime(), table, context, config.getMarkersDeleteParallelism());
       } catch (IOException e) {
         throw new HoodieException("Converting marker files to DIRECT style failed during downgrade", e);
       }
     }
-    return Collections.emptyMap();
+    return Pair.of(Collections.emptyMap(), Collections.emptyList());
   }
 
   /**

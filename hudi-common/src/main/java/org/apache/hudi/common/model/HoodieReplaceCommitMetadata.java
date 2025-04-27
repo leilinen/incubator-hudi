@@ -18,9 +18,8 @@
 
 package org.apache.hudi.common.model;
 
-import org.apache.hudi.common.util.JsonUtils;
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import org.apache.hudi.common.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,13 +29,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.apache.hudi.common.table.timeline.MetadataConversionUtils.convertCommitMetadataToJsonBytes;
-import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.deserializeReplaceCommitMetadata;
-import static org.apache.hudi.common.util.StringUtils.fromUTF8Bytes;
-
 /**
- * All the metadata that gets stored along with a commit.
+ * Represents replace commit metadata.
+ *
+ * @deprecated As of Hudi version 1.1.0
+ * Please use the standard Avro-generated model
+ * {@link org.apache.hudi.avro.model.HoodieReplaceCommitMetadata} instead.
+ * This class may be removed in a future release.
  */
+@Deprecated // we should only rely on their avro counterpart completely.
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class HoodieReplaceCommitMetadata extends HoodieCommitMetadata {
   private static final Logger LOG = LoggerFactory.getLogger(HoodieReplaceCommitMetadata.class);
@@ -109,20 +110,6 @@ public class HoodieReplaceCommitMetadata extends HoodieCommitMetadata {
     int result = partitionToWriteStats.hashCode();
     result = 31 * result + compacted.hashCode();
     return result;
-  }
-
-  public static <T> T fromBytes(byte[] bytes, Class<T> clazz) throws IOException {
-    try {
-      if (bytes.length == 0) {
-        return clazz.newInstance();
-      }
-      return fromJsonString(
-          fromUTF8Bytes(
-              convertCommitMetadataToJsonBytes(deserializeReplaceCommitMetadata(bytes), org.apache.hudi.avro.model.HoodieReplaceCommitMetadata.class)),
-          clazz);
-    } catch (Exception e) {
-      throw new IOException("unable to read commit metadata for bytes length: " + bytes.length, e);
-    }
   }
 
   @Override

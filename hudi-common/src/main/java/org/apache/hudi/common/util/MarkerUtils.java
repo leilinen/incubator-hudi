@@ -21,7 +21,6 @@ package org.apache.hudi.common.util;
 
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
-import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.marker.MarkerType;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
@@ -231,7 +230,7 @@ public class MarkerUtils {
     InputStream inputStream = null;
     Set<String> markers = new HashSet<>();
     try {
-      LOG.debug("Read marker file: " + markersFilePath);
+      LOG.debug("Read marker file: {}", markersFilePath);
       HoodieStorage storage = HoodieStorageUtils.getStorage(markersFilePath, conf);
       inputStream = storage.open(markersFilePath);
       markers = new HashSet<>(FileIOUtils.readAsUTFStringLines(inputStream));
@@ -277,8 +276,8 @@ public class MarkerUtils {
     currentInstants.removeAll(completedCommitInstants);
     Set<String> missingFileIDs = currentInstants.stream().flatMap(instant -> {
       try {
-        return HoodieCommitMetadata.fromBytes(activeTimeline.getInstantDetails(instant).get(), HoodieCommitMetadata.class)
-            .getFileIdAndRelativePaths().keySet().stream();
+        return activeTimeline.readCommitMetadata(instant).getFileIdAndRelativePaths()
+            .keySet().stream();
       } catch (Exception e) {
         return Stream.empty();
       }
@@ -307,7 +306,7 @@ public class MarkerUtils {
       String instantTime = markerDirToInstantTime(instantPath);
       return instantTime.compareToIgnoreCase(currentInstantTime) < 0
           && !activeTimeline.filterPendingCompactionTimeline().containsInstant(instantTime)
-          && !activeTimeline.filterPendingReplaceTimeline().containsInstant(instantTime);
+          && !activeTimeline.filterPendingReplaceOrClusteringTimeline().containsInstant(instantTime);
     }).filter(instantPath -> {
       try {
         return !isHeartbeatExpired(markerDirToInstantTime(instantPath),

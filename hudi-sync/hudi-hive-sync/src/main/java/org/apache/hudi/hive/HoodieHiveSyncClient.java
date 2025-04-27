@@ -19,6 +19,7 @@
 package org.apache.hudi.hive;
 
 import org.apache.hudi.common.model.HoodieFileFormat;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -80,8 +81,8 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
   DDLExecutor ddlExecutor;
   private IMetaStoreClient client;
 
-  public HoodieHiveSyncClient(HiveSyncConfig config) {
-    super(config);
+  public HoodieHiveSyncClient(HiveSyncConfig config, HoodieTableMetaClient metaClient) {
+    super(config, metaClient);
     this.config = config;
     this.databaseName = config.getStringOrDefault(META_SYNC_DATABASE_NAME);
 
@@ -186,7 +187,7 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
       }
 
       if (!shouldUpdate) {
-        LOG.debug("Table " + tableName + " serdeProperties and formatClass already up to date, skip update.");
+        LOG.debug("Table {} serdeProperties and formatClass already up to date, skip update.", tableName);
         return false;
       }
 
@@ -201,7 +202,7 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
   }
 
   @Override
-  public void updateTableSchema(String tableName, MessageType newSchema) {
+  public void updateTableSchema(String tableName, MessageType newSchema, SchemaDifference schemaDiff) {
     ddlExecutor.updateTableDefinition(tableName, newSchema);
   }
 
@@ -355,7 +356,7 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
   }
 
   public void updateLastReplicatedTimeStamp(String tableName, String timeStamp) {
-    if (getActiveTimeline().getInstantsAsStream().noneMatch(i -> i.getTimestamp().equals(timeStamp))) {
+    if (getActiveTimeline().getInstantsAsStream().noneMatch(i -> i.requestedTime().equals(timeStamp))) {
       throw new HoodieHiveSyncException(
           "Not a valid completed timestamp " + timeStamp + " for table " + tableName);
     }
@@ -402,13 +403,8 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
   public void updateLastCommitTimeSynced(String tableName) {
     // Set the last commit time and commit completion from the TBLproperties
     HoodieTimeline activeTimeline = getActiveTimeline();
-    Option<String> lastCommitSynced = activeTimeline.lastInstant().map(HoodieInstant::getTimestamp);
-    Option<String> lastCommitCompletionSynced = activeTimeline
-        .getInstantsOrderedByCompletionTime()
-        .skip(activeTimeline.countInstants() - 1)
-        .findFirst()
-        .map(i -> Option.of(i.getCompletionTime()))
-        .orElse(Option.empty());
+    Option<String> lastCommitSynced = activeTimeline.lastInstant().map(HoodieInstant::requestedTime);
+    Option<String> lastCommitCompletionSynced = activeTimeline.getLatestCompletionTime();
     if (lastCommitSynced.isPresent()) {
       try {
         Table table = client.getTable(databaseName, tableName);
@@ -418,7 +414,9 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
         SerDeInfo serdeInfo = sd.getSerdeInfo();
         serdeInfo.putToParameters(ConfigUtils.TABLE_SERDE_PATH, basePath);
         table.putToParameters(HOODIE_LAST_COMMIT_TIME_SYNC, lastCommitSynced.get());
-        table.putToParameters(HOODIE_LAST_COMMIT_COMPLETION_TIME_SYNC, lastCommitCompletionSynced.get());
+        if (lastCommitCompletionSynced.isPresent()) {
+          table.putToParameters(HOODIE_LAST_COMMIT_COMPLETION_TIME_SYNC, lastCommitCompletionSynced.get());
+        }
         client.alter_table(databaseName, tableName, table);
       } catch (Exception e) {
         throw new HoodieHiveSyncException("Failed to get update last commit time synced to " + lastCommitSynced, e);
@@ -485,6 +483,16 @@ public class HoodieHiveSyncClient extends HoodieSyncClient {
       LOG.info("Successfully deleted table in Hive: {}.{}", databaseName, tableName);
     } catch (Exception e) {
       throw new HoodieHiveSyncException("Failed to delete the table " + tableId(databaseName, tableName), e);
+    }
+  }
+
+  @Override
+  public String getTableLocation(String tableName) {
+    try {
+      Table table = client.getTable(databaseName, tableName);
+      return table.getSd().getLocation();
+    } catch (Exception e) {
+      throw new HoodieHiveSyncException("Failed to get the basepath of the table " + tableId(databaseName, tableName), e);
     }
   }
 }

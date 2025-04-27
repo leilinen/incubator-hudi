@@ -27,9 +27,9 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordMerger;
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.table.log.InstantRange;
-import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.HoodieRecordUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
@@ -68,13 +68,13 @@ import org.apache.flink.types.RowKind;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.stream.Collectors;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.HOODIE_COMMIT_TIME_COL_POS;
@@ -149,7 +149,7 @@ public class MergeOnReadInputFormat
    */
   private boolean closed = true;
 
-  private final InternalSchemaManager internalSchemaManager;
+  protected final InternalSchemaManager internalSchemaManager;
 
   protected MergeOnReadInputFormat(
       Configuration conf,
@@ -205,7 +205,7 @@ public class MergeOnReadInputFormat
       }
     } else if (!split.getBasePath().isPresent()) {
       // log files only
-      if (OptionsResolver.emitChangelog(conf)) {
+      if (OptionsResolver.emitDeletes(conf)) {
         return new LogFileOnlyIterator(getUnMergedLogFileIterator(split));
       } else {
         return new LogFileOnlyIterator(getLogFileIterator(split));
@@ -312,7 +312,7 @@ public class MergeOnReadInputFormat
     try {
       return getBaseFileIterator(path, IntStream.range(0, this.tableState.getRowType().getFieldCount()).toArray());
     } catch (IOException e) {
-      throw new HoodieException("Get reader error for path: " + path);
+      throw new HoodieException("Get reader error for path: " + path, e);
     }
   }
 
@@ -441,13 +441,8 @@ public class MergeOnReadInputFormat
       @Override
       public boolean hasNext() {
         while (recordsIterator.hasNext()) {
-          Option<IndexedRecord> curAvroRecord = null;
           final HoodieAvroRecord<?> hoodieRecord = (HoodieAvroRecord) recordsIterator.next();
-          try {
-            curAvroRecord = hoodieRecord.getData().getInsertValue(tableSchema);
-          } catch (IOException e) {
-            throw new HoodieException("Get avro insert value error for key: " + hoodieRecord.getRecordKey(), e);
-          }
+          Option<IndexedRecord> curAvroRecord = getInsertVal(hoodieRecord, tableSchema);
           if (curAvroRecord.isPresent()) {
             final IndexedRecord avroRecord = curAvroRecord.get();
             GenericRecord requiredAvroRecord = buildAvroRecordBySchema(
@@ -473,6 +468,14 @@ public class MergeOnReadInputFormat
         records.close();
       }
     };
+  }
+
+  protected static Option<IndexedRecord> getInsertVal(HoodieAvroRecord<?> hoodieRecord, Schema tableSchema) {
+    try {
+      return hoodieRecord.getData().getInsertValue(tableSchema);
+    } catch (IOException e) {
+      throw new HoodieException("Get avro insert value error for key: " + hoodieRecord.getRecordKey(), e);
+    }
   }
 
   protected ClosableIterator<RowData> getFullLogFileIterator(MergeOnReadInputSplit split) {
@@ -620,11 +623,6 @@ public class MergeOnReadInputFormat
     // iterator for log files
     private final ClosableIterator<RowData> iterator;
 
-    // add the flag because the flink ParquetColumnarRowSplitReader is buggy:
-    // method #reachedEnd() returns false after it returns true.
-    // refactor it out once FLINK-22370 is resolved.
-    private boolean readLogs = false;
-
     private RowData currentRecord;
 
     SkipMergeIterator(ClosableIterator<RowData> nested, ClosableIterator<RowData> iterator) {
@@ -634,11 +632,10 @@ public class MergeOnReadInputFormat
 
     @Override
     public boolean hasNext() {
-      if (!readLogs && this.nested.hasNext()) {
+      if (this.nested.hasNext()) {
         currentRecord = this.nested.next();
         return true;
       }
-      readLogs = true;
       if (this.iterator.hasNext()) {
         currentRecord = this.iterator.next();
         return true;
@@ -682,11 +679,6 @@ public class MergeOnReadInputFormat
     private final InstantRange instantRange;
 
     private final HoodieRecordMerger recordMerger;
-
-    // add the flag because the flink ParquetColumnarRowSplitReader is buggy:
-    // method #reachedEnd() returns false after it returns true.
-    // refactor it out once FLINK-22370 is resolved.
-    private boolean readLogs = false;
 
     private final Set<String> keyToSkip = new HashSet<>();
 
@@ -743,12 +735,12 @@ public class MergeOnReadInputFormat
           .map(String::trim)
           .distinct()
           .collect(Collectors.toList());
-      this.recordMerger = HoodieRecordUtils.createRecordMerger(split.getTablePath(), EngineType.FLINK, mergers, flinkConf.getString(FlinkOptions.RECORD_MERGER_STRATEGY));
+      this.recordMerger = HoodieRecordUtils.createRecordMerger(split.getTablePath(), EngineType.FLINK, mergers, flinkConf.getString(FlinkOptions.RECORD_MERGER_STRATEGY_ID));
     }
 
     @Override
     public boolean hasNext() {
-      while (!readLogs && this.nested.hasNext()) {
+      while (this.nested.hasNext()) {
         currentRecord = this.nested.next();
         if (instantRange != null) {
           boolean isInRange = instantRange.isInRange(currentRecord.getString(HOODIE_COMMIT_TIME_COL_POS).toString());
@@ -785,7 +777,6 @@ public class MergeOnReadInputFormat
         return true;
       }
       // read the logs
-      readLogs = true;
       while (logKeysIterator.hasNext()) {
         final String curKey = logKeysIterator.next();
         if (!keyToSkip.contains(curKey)) {

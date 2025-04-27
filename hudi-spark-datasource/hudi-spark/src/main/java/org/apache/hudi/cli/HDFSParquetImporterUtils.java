@@ -40,6 +40,7 @@ import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.table.action.compact.strategy.CompactionStrategy;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
@@ -67,9 +68,6 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
-
-import scala.Tuple2;
 
 import static org.apache.hudi.common.util.StringUtils.fromUTF8Bytes;
 
@@ -155,12 +153,10 @@ public class HDFSParquetImporterUtils implements Serializable {
 
       if (!fs.exists(new Path(this.targetPath))) {
         // Initialize target hoodie table.
-        Properties properties = HoodieTableMetaClient.withPropertyBuilder()
+        HoodieTableMetaClient.newTableBuilder()
             .setTableName(this.tableName)
             .setTableType(this.tableType)
-            .build();
-        HoodieTableMetaClient.initTableAndGetMetaClient(
-            HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()), this.targetPath, properties);
+            .initTable(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()), this.targetPath);
       }
 
       // Get schema.
@@ -196,7 +192,7 @@ public class HDFSParquetImporterUtils implements Serializable {
             job.getConfiguration())
         // To reduce large number of tasks.
         .coalesce(16 * this.parallelism).map(entry -> {
-          GenericRecord genericRecord = ((Tuple2<Void, GenericRecord>) entry)._2();
+          GenericRecord genericRecord = ((scala.Tuple2<Void, GenericRecord>) entry)._2();
           Object partitionField = genericRecord.get(this.partitionKey);
           if (partitionField == null) {
             throw new HoodieIOException("partition key is missing. :" + this.partitionKey);
@@ -206,13 +202,13 @@ public class HDFSParquetImporterUtils implements Serializable {
             throw new HoodieIOException("row field is missing. :" + this.rowKey);
           }
           String partitionPath = partitionField.toString();
-          LOG.debug("Row Key : " + rowField + ", Partition Path is (" + partitionPath + ")");
+          LOG.debug("Row Key : {}, Partition Path is ({}})", rowField, partitionPath);
           if (partitionField instanceof Number) {
             try {
               long ts = (long) (Double.parseDouble(partitionField.toString()) * 1000L);
               partitionPath = PARTITION_FORMATTER.format(Instant.ofEpochMilli(ts));
             } catch (NumberFormatException nfe) {
-              LOG.warn("Unable to parse date from partition field. Assuming partition as (" + partitionField + ")");
+              LOG.warn("Unable to parse date from partition field. Assuming partition as ({})", partitionField);
             }
           }
           return new HoodieAvroRecord<>(new HoodieKey(rowField.toString(), partitionPath),
@@ -277,9 +273,10 @@ public class HDFSParquetImporterUtils implements Serializable {
    */
   public static SparkRDDWriteClient<HoodieRecordPayload> createHoodieClient(JavaSparkContext jsc, String basePath, String schemaStr,
                                                                             int parallelism, Option<String> compactionStrategyClass, TypedProperties properties) {
-    HoodieCompactionConfig compactionConfig = compactionStrategyClass
+    Option<CompactionStrategy> strategyOpt = compactionStrategyClass.map(ReflectionUtils::loadClass);
+    HoodieCompactionConfig compactionConfig = strategyOpt
         .map(strategy -> HoodieCompactionConfig.newBuilder().withInlineCompaction(false)
-            .withCompactionStrategy(ReflectionUtils.loadClass(strategy)).build())
+            .withCompactionStrategy(strategy).build())
         .orElseGet(() -> HoodieCompactionConfig.newBuilder().withInlineCompaction(false).build());
     HoodieWriteConfig config =
         HoodieWriteConfig.newBuilder().withPath(basePath)
@@ -317,14 +314,14 @@ public class HDFSParquetImporterUtils implements Serializable {
     writeResponse.foreach(writeStatus -> {
       if (writeStatus.hasErrors()) {
         errors.add(1);
-        LOG.error(String.format("Error processing records :writeStatus:%s", writeStatus.getStat().toString()));
+        LOG.error("Error processing records :writeStatus:{}", writeStatus.getStat());
       }
     });
     if (errors.value() == 0) {
-      LOG.info(String.format("Table imported into hoodie with %s instant time.", instantTime));
+      LOG.info("Table imported into hoodie with {} instant time.", instantTime);
       return 0;
     }
-    LOG.error(String.format("Import failed with %d errors.", errors.value()));
+    LOG.error("Import failed with {} errors.", errors.value());
     return -1;
   }
 }

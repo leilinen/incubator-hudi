@@ -47,6 +47,7 @@ import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.unsafe.types.UTF8String;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Properties;
@@ -54,6 +55,7 @@ import java.util.Properties;
 import scala.Function1;
 
 import static org.apache.hudi.common.table.HoodieTableConfig.POPULATE_META_FIELDS;
+import static org.apache.hudi.common.util.StringUtils.isNullOrEmpty;
 import static org.apache.spark.sql.HoodieInternalRowUtils.getCachedUnsafeProjection;
 import static org.apache.spark.sql.types.DataTypes.BooleanType;
 import static org.apache.spark.sql.types.DataTypes.StringType;
@@ -87,10 +89,6 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
    */
   private final transient StructType schema;
 
-  /**
-   * Record is considered deleted if data is null.
-   */
-  private boolean isDeleted;
   public HoodieSparkRecord(UnsafeRow data) {
     this(data, null);
   }
@@ -101,7 +99,6 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
     validateRow(data, schema);
     this.copy = false;
     this.schema = schema;
-    isDeleted = data == null;
   }
 
   public HoodieSparkRecord(HoodieKey key, UnsafeRow data, boolean copy) {
@@ -114,7 +111,6 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
     validateRow(data, schema);
     this.copy = copy;
     this.schema = schema;
-    isDeleted = data == null;
   }
 
   private HoodieSparkRecord(HoodieKey key, InternalRow data, StructType schema, HoodieOperation operation, boolean copy) {
@@ -123,7 +119,6 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
     validateRow(data, schema);
     this.copy = copy;
     this.schema = schema;
-    isDeleted = data == null;
   }
 
   public HoodieSparkRecord(
@@ -137,10 +132,6 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
     super(key, data, operation, currentLocation, newLocation);
     this.copy = copy;
     this.schema = schema;
-  }
-
-  public boolean isDeleted() {
-    return isDeleted;
   }
 
   @Override
@@ -196,6 +187,11 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
   }
 
   @Override
+  public Object getColumnValueAsJava(Schema recordSchema, String column, Properties props) {
+    throw new UnsupportedOperationException("Unsupported yet for " + this.getClass().getSimpleName());
+  }
+
+  @Override
   public HoodieRecord joinWith(HoodieRecord other, Schema targetSchema) {
     StructType targetStructType = HoodieInternalRowUtils.getCachedSchema(targetSchema);
     InternalRow mergeRow = new JoinedRow(data, (InternalRow) other.getData());
@@ -237,14 +233,25 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
   }
 
   @Override
-  public boolean isDelete(Schema recordSchema, Properties props) throws IOException {
+  public boolean isDelete(Schema recordSchema, Properties props) {
     if (null == data) {
       return true;
     }
-    if (recordSchema.getField(HoodieRecord.HOODIE_IS_DELETED_FIELD) == null) {
+
+    // Use metadata filed to decide.
+    Schema.Field operationField = recordSchema.getField(OPERATION_METADATA_FIELD);
+    if (null != operationField
+        && HoodieOperation.isDeleteRecord((String) data.get(operationField.pos(), StringType))) {
+      return true;
+    }
+
+    // Use data field to decide.
+    if (recordSchema.getField(HOODIE_IS_DELETED_FIELD) == null) {
       return false;
     }
-    Object deleteMarker = data.get(recordSchema.getField(HoodieRecord.HOODIE_IS_DELETED_FIELD).pos(), BooleanType);
+
+    Object deleteMarker = data.get(
+        recordSchema.getField(HOODIE_IS_DELETED_FIELD).pos(), BooleanType);
     return deleteMarker instanceof Boolean && (boolean) deleteMarker;
   }
 
@@ -298,7 +305,12 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
   }
 
   @Override
-  public Option<HoodieAvroIndexedRecord> toIndexedRecord(Schema recordSchema, Properties prop) throws IOException {
+  public Option<HoodieAvroIndexedRecord> toIndexedRecord(Schema recordSchema, Properties prop) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public ByteArrayOutputStream getAvroBytes(Schema recordSchema, Properties props) throws IOException {
     throw new UnsupportedOperationException();
   }
 
@@ -315,13 +327,16 @@ public class HoodieSparkRecord extends HoodieRecord<InternalRow> {
   public Comparable<?> getOrderingValue(Schema recordSchema, Properties props) {
     StructType structType = HoodieInternalRowUtils.getCachedSchema(recordSchema);
     String orderingField = ConfigUtils.getOrderingField(props);
+    if (isNullOrEmpty(orderingField)) {
+      return DEFAULT_ORDERING_VALUE;
+    }
     scala.Option<NestedFieldPath> cachedNestedFieldPath =
         HoodieInternalRowUtils.getCachedPosList(structType, orderingField);
     if (cachedNestedFieldPath.isDefined()) {
       NestedFieldPath nestedFieldPath = cachedNestedFieldPath.get();
       return (Comparable<?>) HoodieUnsafeRowUtils.getNestedInternalRowValue(data, nestedFieldPath);
     } else {
-      return 0;
+      return DEFAULT_ORDERING_VALUE;
     }
   }
 

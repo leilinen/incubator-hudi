@@ -67,7 +67,7 @@ public class SparkRDDReadClient<T> implements Serializable {
    * base path pointing to the table. Until, then just always assume a BloomIndex
    */
   private final transient HoodieIndex<?, ?> index;
-  private HoodieTable hoodieTable;
+  private final HoodieTable hoodieTable;
   private transient Option<SQLContext> sqlContextOpt;
   private final transient HoodieSparkEngineContext context;
   private final transient StorageConfiguration<?> storageConf;
@@ -228,7 +228,7 @@ public class SparkRDDReadClient<T> implements Serializable {
         .setConf(storageConf.newInstance()).setBasePath(hoodieTable.getMetaClient().getBasePath()).setLoadActiveTimelineOnLoad(true).build();
     return CompactionUtils.getAllPendingCompactionPlans(metaClient).stream()
         .map(
-            instantWorkloadPair -> Pair.of(instantWorkloadPair.getKey().getTimestamp(), instantWorkloadPair.getValue()))
+            instantWorkloadPair -> Pair.of(instantWorkloadPair.getKey().requestedTime(), instantWorkloadPair.getValue()))
         .collect(Collectors.toList());
   }
 }

@@ -172,15 +172,14 @@ public class WriteProfiles {
       HoodieInstant instant,
       HoodieTimeline timeline) {
     try {
-      byte[] data = timeline.getInstantDetails(instant).get();
-      return Option.of(HoodieCommitMetadata.fromBytes(data, HoodieCommitMetadata.class));
+      return Option.of(timeline.readCommitMetadata(instant));
     } catch (FileNotFoundException fe) {
       // make this fail safe.
-      LOG.warn("Instant {} was deleted by the cleaner, ignore", instant.getTimestamp());
+      LOG.warn("Instant {} was deleted by the cleaner, ignore", instant.requestedTime());
       return Option.empty();
     } catch (Throwable throwable) {
       LOG.error("Get write metadata for table {} with instant {} and path: {} error",
-          tableName, instant.getTimestamp(), basePath);
+          tableName, instant.requestedTime(), basePath);
       return Option.empty();
     }
   }
@@ -203,7 +202,7 @@ public class WriteProfiles {
       return TimelineUtils.getCommitMetadata(instant, timeline);
     } catch (IOException e) {
       LOG.error("Get write metadata for table {} with instant {} and path: {} error",
-          tableName, instant.getTimestamp(), basePath);
+          tableName, instant.requestedTime(), basePath);
       throw new HoodieException(e);
     }
   }

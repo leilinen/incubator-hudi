@@ -20,6 +20,7 @@ package org.apache.hudi.client.functional;
 
 import org.apache.hudi.client.HoodieJavaWriteClient;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.view.SyncableFileSystemView;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.util.Option;
@@ -36,13 +37,13 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Map;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.TIMELINE_FACTORY;
 import static org.apache.hudi.testutils.GenericRecordValidationTestUtils.assertDataInMORTable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTestHarness {
-
-  private HoodieTestTable testTable;
 
   @BeforeEach
   public void setUpTestTable() {
@@ -61,20 +62,25 @@ public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTe
     // Insert
     String commitTime = client.createNewInstantTime();
     insertBatch(config, client, commitTime, "000", 100, HoodieJavaWriteClient::insert,
-        false, false, 100, 100, 1, Option.empty());
+        false, false, 100, 100, 1, Option.empty(), INSTANT_GENERATOR);
+    // check that only log files exist
+    try (SyncableFileSystemView fileSystemView = getFileSystemView(metaClient.reloadActiveTimeline())) {
+      Arrays.stream(dataGen.getPartitionPaths())
+          .forEach(partition -> fileSystemView.getLatestFileSlices(partition).forEach(fileSlice -> assertTrue(fileSlice.getBaseFile().isEmpty())));
+    }
 
     // Update
     String commitTimeBetweenPrevAndNew = commitTime;
     commitTime = client.createNewInstantTime();
     updateBatch(config, client, commitTime, commitTimeBetweenPrevAndNew,
         Option.of(Arrays.asList(commitTimeBetweenPrevAndNew)), "000", 50, HoodieJavaWriteClient::upsert,
-        false, false, 50, 100, 2, config.populateMetaFields());
+        false, false, 50, 100, 2, config.populateMetaFields(), INSTANT_GENERATOR);
 
     // Delete 5 records
     String prevCommitTime = commitTime;
     commitTime = client.createNewInstantTime();
     deleteBatch(config, client, commitTime, prevCommitTime, "000", 25, false, false,
-        0, 100);
+        0, 100, TIMELINE_FACTORY, INSTANT_GENERATOR);
 
     // Verify all the records.
     metaClient.reloadActiveTimeline();
@@ -94,14 +100,14 @@ public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTe
     // Insert
     String commitTime = client.createNewInstantTime();
     insertBatch(config, client, commitTime, "000", 100, HoodieJavaWriteClient::insert,
-        false, false, 100, 100, 1, Option.empty());
+        false, false, 100, 100, 1, Option.empty(), INSTANT_GENERATOR);
 
     // Update
     String commitTimeBetweenPrevAndNew = commitTime;
     commitTime = client.createNewInstantTime();
     updateBatch(config, client, commitTime, commitTimeBetweenPrevAndNew,
         Option.of(Arrays.asList(commitTimeBetweenPrevAndNew)), "000", 50, HoodieJavaWriteClient::upsert,
-        false, false, 5, 100, 2, config.populateMetaFields());
+        false, false, 5, 100, 2, config.populateMetaFields(), INSTANT_GENERATOR);
 
     // Schedule and execute compaction.
     Option<String> timeStamp = client.scheduleCompaction(Option.empty());
@@ -125,14 +131,14 @@ public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTe
     // Insert
     String commitTime = client.createNewInstantTime();
     insertBatch(config, client, commitTime, "000", 100, HoodieJavaWriteClient::insert,
-        false, false, 100, 100, 1, Option.empty());
+        false, false, 100, 100, 1, Option.empty(), INSTANT_GENERATOR);
 
     // Update
     String commitTimeBetweenPrevAndNew = commitTime;
     commitTime = client.createNewInstantTime();
     updateBatch(config, client, commitTime, commitTimeBetweenPrevAndNew,
         Option.of(Arrays.asList(commitTimeBetweenPrevAndNew)), "000", 50, HoodieJavaWriteClient::upsert,
-        false, false, 5, 100, 2, config.populateMetaFields());
+        false, false, 5, 100, 2, config.populateMetaFields(), INSTANT_GENERATOR);
 
     // Schedule compaction but do not run it
     Option<String> timeStamp = client.scheduleCompaction(Option.empty());
@@ -142,7 +148,7 @@ public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTe
     commitTime = client.createNewInstantTime();
     updateBatch(config, client, commitTime, commitTimeBetweenPrevAndNew,
         Option.of(Arrays.asList(commitTimeBetweenPrevAndNew)), "000", 50, HoodieJavaWriteClient::upsert,
-        false, false, 5, 150, 2, config.populateMetaFields());
+        false, false, 5, 150, 2, config.populateMetaFields(), INSTANT_GENERATOR);
     // Verify all the records.
     metaClient.reloadActiveTimeline();
     assertDataInMORTable(config, commitTime, timeStamp.get(), storageConf, Arrays.asList(dataGen.getPartitionPaths()));
@@ -157,7 +163,7 @@ public class TestHoodieJavaClientOnMergeOnReadStorage extends HoodieJavaClientTe
     commitTime = client.createNewInstantTime();
     updateBatch(config, client, commitTime, commitTimeBetweenPrevAndNew,
         Option.of(Arrays.asList(commitTimeBetweenPrevAndNew)), "000", 50, HoodieJavaWriteClient::upsert,
-        false, false, 5, 200, 2, config.populateMetaFields());
+        false, false, 5, 200, 2, config.populateMetaFields(), INSTANT_GENERATOR);
     // Verify all the records.
     metaClient.reloadActiveTimeline();
     assertDataInMORTable(config, commitTime, timeStamp.get(), storageConf, Arrays.asList(dataGen.getPartitionPaths()));

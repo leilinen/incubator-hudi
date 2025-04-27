@@ -19,24 +19,26 @@
 package org.apache.hudi.table.action.compact;
 
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
+import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.CompactionUtils;
+import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCompactionException;
-import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.table.HoodieTable;
-import org.apache.hudi.table.action.BaseActionExecutor;
+import org.apache.hudi.table.action.BaseTableServicePlanActionExecutor;
 import org.apache.hudi.table.action.compact.plan.generators.BaseHoodieCompactionPlanGenerator;
-import org.apache.hudi.table.action.compact.plan.generators.HoodieCompactionPlanGenerator;
 import org.apache.hudi.table.action.compact.plan.generators.HoodieLogCompactionPlanGenerator;
 
 import org.slf4j.Logger;
@@ -47,13 +49,15 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Map;
 
+import static org.apache.hudi.common.table.timeline.InstantComparison.GREATER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 import static org.apache.hudi.common.util.CollectionUtils.nonEmpty;
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 
-public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K, O, Option<HoodieCompactionPlan>> {
+public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseTableServicePlanActionExecutor<T, I, K, O, Option<HoodieCompactionPlan>> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ScheduleCompactionActionExecutor.class);
-  private WriteOperationType operationType;
+  private final WriteOperationType operationType;
   private final Option<Map<String, String>> extraMetadata;
   private BaseHoodieCompactionPlanGenerator planGenerator;
 
@@ -73,9 +77,10 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
 
   private void initPlanGenerator(HoodieEngineContext context, HoodieWriteConfig config, HoodieTable<T, I, K, O> table) {
     if (WriteOperationType.COMPACT.equals(operationType)) {
-      planGenerator = new HoodieCompactionPlanGenerator(table, context, config);
+      String planGeneratorClass = ConfigUtils.getStringWithAltKeys(config.getProps(), HoodieCompactionConfig.COMPACTION_PLAN_GENERATOR, true);
+      planGenerator = createCompactionPlanGenerator(planGeneratorClass, table, context, config);
     } else {
-      planGenerator = new HoodieLogCompactionPlanGenerator(table, context, config);
+      planGenerator = new HoodieLogCompactionPlanGenerator(table, context, config, this);
     }
   }
 
@@ -84,25 +89,33 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
     ValidationUtils.checkArgument(this.table.getMetaClient().getTableType() == HoodieTableType.MERGE_ON_READ,
         "Can only compact table of type " + HoodieTableType.MERGE_ON_READ + " and not "
             + this.table.getMetaClient().getTableType().name());
+    if (!table.getMetaClient().getTableConfig().getTableVersion().greaterThanOrEquals(HoodieTableVersion.EIGHT)
+        && !config.getWriteConcurrencyMode().supportsMultiWriter()
+        && !config.getFailedWritesCleanPolicy().isLazy()) {
+      // TODO(yihua): this validation is removed for Java client used by kafka-connect.  Need to revisit this.
+      if (config.getEngineType() == EngineType.SPARK) {
+        // if there are inflight writes, their instantTime must not be less than that of compaction instant time
+        Option<HoodieInstant> earliestInflightOpt = table.getActiveTimeline().getCommitsTimeline().filterPendingExcludingCompactionAndLogCompaction().firstInstant();
+        if (earliestInflightOpt.isPresent() && !compareTimestamps(earliestInflightOpt.get().requestedTime(), GREATER_THAN, instantTime)) {
+          LOG.warn("Earliest write inflight instant time must be later than compaction time. Earliest :" + earliestInflightOpt.get()
+              + ", Compaction scheduled at " + instantTime + ". Hence skipping to schedule compaction");
+          return Option.empty();
+        }
+      }
+    }
 
     HoodieCompactionPlan plan = scheduleCompaction();
     Option<HoodieCompactionPlan> option = Option.empty();
     if (plan != null && nonEmpty(plan.getOperations())) {
       extraMetadata.ifPresent(plan::setExtraMetadata);
-      try {
-        if (operationType.equals(WriteOperationType.COMPACT)) {
-          HoodieInstant compactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED,
-              HoodieTimeline.COMPACTION_ACTION, instantTime);
-          table.getActiveTimeline().saveToCompactionRequested(compactionInstant,
-              TimelineMetadataUtils.serializeCompactionPlan(plan));
-        } else {
-          HoodieInstant logCompactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED,
-              HoodieTimeline.LOG_COMPACTION_ACTION, instantTime);
-          table.getActiveTimeline().saveToLogCompactionRequested(logCompactionInstant,
-              TimelineMetadataUtils.serializeCompactionPlan(plan));
-        }
-      } catch (IOException ioe) {
-        throw new HoodieIOException("Exception scheduling compaction", ioe);
+      if (operationType.equals(WriteOperationType.COMPACT)) {
+        HoodieInstant compactionInstant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED,
+            HoodieTimeline.COMPACTION_ACTION, instantTime);
+        table.getActiveTimeline().saveToCompactionRequested(compactionInstant, plan);
+      } else {
+        HoodieInstant logCompactionInstant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED,
+            HoodieTimeline.LOG_COMPACTION_ACTION, instantTime);
+        table.getActiveTimeline().saveToLogCompactionRequested(logCompactionInstant, plan);
       }
       option = Option.of(plan);
     }
@@ -133,7 +146,7 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
     if (deltaCommitsInfo.isPresent()) {
       return Option.of(Pair.of(
           deltaCommitsInfo.get().getLeft().countInstants(),
-          deltaCommitsInfo.get().getRight().getTimestamp()));
+          deltaCommitsInfo.get().getRight().requestedTime()));
     }
     return Option.empty();
   }
@@ -144,7 +157,7 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
     if (deltaCommitsInfo.isPresent()) {
       return Option.of(Pair.of(
             deltaCommitsInfo.get().getLeft().countInstants(),
-            deltaCommitsInfo.get().getRight().getTimestamp()));
+            deltaCommitsInfo.get().getRight().requestedTime()));
     }
     return Option.empty();
   }
@@ -166,7 +179,7 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
       case NUM_COMMITS:
         compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft();
         if (compactable) {
-          LOG.info(String.format("The delta commits >= %s, trigger compaction scheduler.", inlineCompactDeltaCommitMax));
+          LOG.info("The delta commits >= {}, trigger compaction scheduler.", inlineCompactDeltaCommitMax);
         }
         break;
       case NUM_COMMITS_AFTER_LAST_REQUEST:
@@ -178,29 +191,29 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
         latestDeltaCommitInfo = latestDeltaCommitInfoOption.get();
         compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft();
         if (compactable) {
-          LOG.info(String.format("The delta commits >= %s since the last compaction request, trigger compaction scheduler.", inlineCompactDeltaCommitMax));
+          LOG.info("The delta commits >= {} since the last compaction request, trigger compaction scheduler.", inlineCompactDeltaCommitMax);
         }
         break;
       case TIME_ELAPSED:
         compactable = inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
         if (compactable) {
-          LOG.info(String.format("The elapsed time >=%ss, trigger compaction scheduler.", inlineCompactDeltaSecondsMax));
+          LOG.info("The elapsed time >={}s, trigger compaction scheduler.", inlineCompactDeltaSecondsMax);
         }
         break;
       case NUM_OR_TIME:
         compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft()
             || inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
         if (compactable) {
-          LOG.info(String.format("The delta commits >= %s or elapsed_time >=%ss, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
-              inlineCompactDeltaSecondsMax));
+          LOG.info("The delta commits >= {} or elapsed_time >={}s, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
+              inlineCompactDeltaSecondsMax);
         }
         break;
       case NUM_AND_TIME:
         compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft()
             && inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
         if (compactable) {
-          LOG.info(String.format("The delta commits >= %s and elapsed_time >=%ss, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
-              inlineCompactDeltaSecondsMax));
+          LOG.info("The delta commits >= {} and elapsed_time >={}s, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
+              inlineCompactDeltaSecondsMax);
         }
         break;
       default:
@@ -210,7 +223,12 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
   }
 
   private Long parsedToSeconds(String time) {
-    return HoodieActiveTimeline.parseDateFromInstantTimeSafely(time).orElseThrow(() -> new HoodieCompactionException("Failed to parse timestamp " + time))
+    return TimelineUtils.parseDateFromInstantTimeSafely(time).orElseThrow(() -> new HoodieCompactionException("Failed to parse timestamp " + time))
             .getTime() / 1000;
+  }
+
+  private BaseHoodieCompactionPlanGenerator createCompactionPlanGenerator(String planGeneratorClass, HoodieTable table, HoodieEngineContext context, HoodieWriteConfig config) {
+    return (BaseHoodieCompactionPlanGenerator) ReflectionUtils.loadClass(planGeneratorClass,
+        new Class<?>[] {HoodieTable.class, HoodieEngineContext.class, HoodieWriteConfig.class, BaseTableServicePlanActionExecutor.class}, table, context, config, this);
   }
 }

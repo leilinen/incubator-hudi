@@ -26,14 +26,19 @@ import org.apache.hudi.avro.HoodieAvroUtils.removeMetadataFields
 import org.apache.hudi.common.config.{HoodieCommonConfig, HoodieConfig, TypedProperties}
 import org.apache.hudi.common.model.HoodieRecord
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
+import org.apache.hudi.common.util.{ConfigUtils, StringUtils}
 import org.apache.hudi.config.HoodieWriteConfig
-import org.apache.hudi.exception.SchemaCompatibilityException
+import org.apache.hudi.exception.{HoodieException, SchemaCompatibilityException}
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.internal.schema.convert.AvroInternalSchemaConverter
 import org.apache.hudi.internal.schema.utils.AvroSchemaEvolutionUtils
 import org.apache.hudi.internal.schema.utils.AvroSchemaEvolutionUtils.reconcileSchemaRequirements
+
 import org.apache.avro.Schema
+import org.apache.spark.sql.types.{StructField, StructType}
 import org.slf4j.LoggerFactory
+
+import java.util.Properties
 
 import scala.collection.JavaConverters._
 
@@ -42,6 +47,24 @@ import scala.collection.JavaConverters._
  */
 object HoodieSchemaUtils {
   private val log = LoggerFactory.getLogger(getClass)
+
+  def getSchemaForField(schema: StructType, fieldName: String): org.apache.hudi.common.util.collection.Pair[String, StructField] = {
+    getSchemaForField(schema, fieldName, StringUtils.EMPTY_STRING)
+  }
+
+  def getSchemaForField(schema: StructType, fieldName: String, prefix: String): org.apache.hudi.common.util.collection.Pair[String, StructField] = {
+    if (!(fieldName.contains("."))) {
+      org.apache.hudi.common.util.collection.Pair.of(prefix + schema.fields(schema.fieldIndex(fieldName)).name, schema.fields(schema.fieldIndex(fieldName)))
+    }
+    else {
+      val rootFieldIndex: Int = fieldName.indexOf(".")
+      val rootField: StructField = schema.fields(schema.fieldIndex(fieldName.substring(0, rootFieldIndex)))
+      if (rootField == null) {
+        throw new HoodieException("Failed to find " + fieldName + " in the table schema ")
+      }
+      getSchemaForField(rootField.dataType.asInstanceOf[StructType], fieldName.substring(rootFieldIndex + 1), prefix + fieldName.substring(0, rootFieldIndex + 1))
+    }
+  }
 
   /**
    * get latest internalSchema from table
@@ -52,7 +75,19 @@ object HoodieSchemaUtils {
    */
   def getLatestTableInternalSchema(config: HoodieConfig,
                                    tableMetaClient: HoodieTableMetaClient): Option[InternalSchema] = {
-    if (!config.getBooleanOrDefault(DataSourceReadOptions.SCHEMA_EVOLUTION_ENABLED)) {
+    getLatestTableInternalSchema(config.getProps, tableMetaClient)
+  }
+
+  /**
+   * get latest internalSchema from table
+   *
+   * @param props           instance of {@link Properties}
+   * @param tableMetaClient instance of HoodieTableMetaClient
+   * @return Option of InternalSchema. Will always be empty if schema on read is disabled
+   */
+  def getLatestTableInternalSchema(props: Properties,
+                                   tableMetaClient: HoodieTableMetaClient): Option[InternalSchema] = {
+    if (!ConfigUtils.getBooleanWithAltKeys(props, DataSourceReadOptions.SCHEMA_EVOLUTION_ENABLED)) {
       None
     } else {
       try {
@@ -241,6 +276,27 @@ object HoodieSchemaUtils {
       // Picking new schema as a writer schema we need to validate that we'd be able to
       // rewrite table's data into it
       (newSchema, isSchemaCompatible(tableSchema, newSchema))
+    }
+  }
+
+  /**
+   * Check if the partition schema fields order matches the table schema fields order.
+   *
+   * @param tableSchema      The table schema
+   * @param partitionFields  The partition fields
+   */
+  def checkPartitionSchemaOrder(tableSchema: StructType, partitionFields: Seq[String]): Unit = {
+    val tableSchemaFields = tableSchema.fields.map(_.name)
+    // It is not allowed to specify partition columns when the table schema is not defined.
+    // https://spark.apache.org/docs/latest/sql-error-conditions.html#specify_partition_is_not_allowed
+    if (tableSchemaFields.isEmpty && partitionFields.nonEmpty) {
+      throw new IllegalArgumentException("It is not allowed to specify partition columns when the table schema is not defined.")
+    }
+    // Filter the table schema fields to get the partition field names in order
+    val tableSchemaPartitionFields = tableSchemaFields.filter(partitionFields.contains).toSeq
+    if (tableSchemaPartitionFields != partitionFields) {
+      throw new IllegalArgumentException(s"Partition schema fields order does not match the table schema fields order," +
+        s" tableSchemaFields: $tableSchemaPartitionFields, partitionFields: $partitionFields.")
     }
   }
 }

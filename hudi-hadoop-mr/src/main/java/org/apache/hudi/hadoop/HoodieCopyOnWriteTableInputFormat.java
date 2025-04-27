@@ -61,11 +61,9 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.config.HoodieMetadataConfig.ENABLE;
-import static org.apache.hudi.hadoop.fs.HadoopFSUtils.convertToStoragePath;
 
 /**
  * Base implementation of the Hive's {@link FileInputFormat} allowing for reading of Hudi's
@@ -231,8 +229,6 @@ public class HoodieCopyOnWriteTableInputFormat extends HoodieTableInputFormat {
     HoodieLocalEngineContext engineContext = new HoodieLocalEngineContext(HadoopFSUtils.getStorageConf(job));
     List<FileStatus> targetFiles = new ArrayList<>();
 
-    TypedProperties props = new TypedProperties(new Properties());
-
     Map<HoodieTableMetaClient, List<Path>> groupedPaths =
         HoodieInputFormatUtils.groupSnapshotPathsByMetaClient(tableMetaClientMap.values(), snapshotPaths);
 
@@ -253,7 +249,7 @@ public class HoodieCopyOnWriteTableInputFormat extends HoodieTableInputFormat {
             new HiveHoodieTableFileIndex(
                 engineContext,
                 tableMetaClient,
-                props,
+                new TypedProperties(),
                 HoodieTableQueryType.SNAPSHOT,
                 partitionPaths.stream().map(HadoopFSUtils::convertToStoragePath).collect(Collectors.toList()),
                 queryCommitInstant,
@@ -271,13 +267,13 @@ public class HoodieCopyOnWriteTableInputFormat extends HoodieTableInputFormat {
                 .collect(Collectors.toList())
         );
       } else {
-        // If hoodie.metadata.enabled is set to false and the table doesn't have the metadata,
+        // If hoodie.metadata.enable is set to false and the table doesn't have the metadata,
         // read the table using fs view cache instead of file index.
         // This is because there's no file index in non-metadata table.
         String basePath = tableMetaClient.getBasePath().toString();
         Map<HoodieTableMetaClient, HoodieTableFileSystemView> fsViewCache = new HashMap<>();
         HoodieTimeline timeline = getActiveTimeline(tableMetaClient, shouldIncludePendingCommits);
-        Option<String> queryInstant = queryCommitInstant.or(() -> timeline.lastInstant().map(HoodieInstant::getTimestamp));
+        Option<String> queryInstant = queryCommitInstant.or(() -> timeline.lastInstant().map(HoodieInstant::requestedTime));
         validateInstant(timeline, queryInstant);
 
         try {

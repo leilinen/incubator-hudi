@@ -19,19 +19,23 @@
 
 package org.apache.hudi.common.engine;
 
-import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordMerger;
-import org.apache.hudi.common.table.read.HoodieFileGroupReaderSchemaHandler;
-import org.apache.hudi.common.util.ConfigUtils;
+import org.apache.hudi.common.table.read.FileGroupReaderSchemaHandler;
+import org.apache.hudi.common.util.LocalAvroSchemaCache;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StoragePathInfo;
 
 import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -39,6 +43,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.UnaryOperator;
 
+import static org.apache.hudi.common.model.HoodieRecord.DEFAULT_ORDERING_VALUE;
 import static org.apache.hudi.common.model.HoodieRecord.RECORD_KEY_METADATA_FIELD;
 
 /**
@@ -53,22 +58,29 @@ import static org.apache.hudi.common.model.HoodieRecord.RECORD_KEY_METADATA_FIEL
  *            and {@code RowData} in Flink.
  */
 public abstract class HoodieReaderContext<T> {
-
-  private HoodieFileGroupReaderSchemaHandler<T> schemaHandler = null;
+  private final StorageConfiguration<?> storageConfiguration;
+  private FileGroupReaderSchemaHandler<T> schemaHandler = null;
   private String tablePath = null;
   private String latestCommitTime = null;
-  private HoodieRecordMerger recordMerger = null;
+  private Option<HoodieRecordMerger> recordMerger = null;
   private Boolean hasLogFiles = null;
   private Boolean hasBootstrapBaseFile = null;
   private Boolean needsBootstrapMerge = null;
   private Boolean shouldMergeUseRecordPosition = null;
 
+  // for encoding and decoding schemas to the spillable map
+  private final LocalAvroSchemaCache localAvroSchemaCache = LocalAvroSchemaCache.getInstance();
+
+  protected HoodieReaderContext(StorageConfiguration<?> storageConfiguration) {
+    this.storageConfiguration = storageConfiguration;
+  }
+
   // Getter and Setter for schemaHandler
-  public HoodieFileGroupReaderSchemaHandler<T> getSchemaHandler() {
+  public FileGroupReaderSchemaHandler<T> getSchemaHandler() {
     return schemaHandler;
   }
 
-  public void setSchemaHandler(HoodieFileGroupReaderSchemaHandler<T> schemaHandler) {
+  public void setSchemaHandler(FileGroupReaderSchemaHandler<T> schemaHandler) {
     this.schemaHandler = schemaHandler;
   }
 
@@ -91,11 +103,11 @@ public abstract class HoodieReaderContext<T> {
     this.latestCommitTime = latestCommitTime;
   }
 
-  public HoodieRecordMerger getRecordMerger() {
+  public Option<HoodieRecordMerger> getRecordMerger() {
     return recordMerger;
   }
 
-  public void setRecordMerger(HoodieRecordMerger recordMerger) {
+  public void setRecordMerger(Option<HoodieRecordMerger> recordMerger) {
     this.recordMerger = recordMerger;
   }
 
@@ -135,6 +147,10 @@ public abstract class HoodieReaderContext<T> {
     this.shouldMergeUseRecordPosition = shouldMergeUseRecordPosition;
   }
 
+  public StorageConfiguration<?> getStorageConfiguration() {
+    return storageConfiguration;
+  }
+
   // These internal key names are only used in memory for record metadata and merging,
   // and should not be persisted to storage.
   public static final String INTERNAL_META_RECORD_KEY = "_0";
@@ -142,16 +158,7 @@ public abstract class HoodieReaderContext<T> {
   public static final String INTERNAL_META_ORDERING_FIELD = "_2";
   public static final String INTERNAL_META_OPERATION = "_3";
   public static final String INTERNAL_META_INSTANT_TIME = "_4";
-  public static final String INTERNAL_META_SCHEMA = "_5";
-
-  /**
-   * Gets the file system based on the file path and configuration.
-   *
-   * @param path File path to get the file system.
-   * @param conf {@link StorageConfiguration} for I/O.
-   * @return The {@link HoodieStorage} instance to use.
-   */
-  public abstract HoodieStorage getStorage(String path, StorageConfiguration<?> conf);
+  public static final String INTERNAL_META_SCHEMA_ID = "_5";
 
   /**
    * Gets the record iterator based on the type of engine-specific record representation from the
@@ -170,6 +177,24 @@ public abstract class HoodieReaderContext<T> {
       HoodieStorage storage) throws IOException;
 
   /**
+   * Gets the record iterator based on the type of engine-specific record representation from the
+   * file.
+   *
+   * @param storagePathInfo {@link StoragePathInfo} instance of a file.
+   * @param start           Starting byte to start reading.
+   * @param length          Bytes to read.
+   * @param dataSchema      Schema of records in the file in {@link Schema}.
+   * @param requiredSchema  Schema containing required fields to read in {@link Schema} for projection.
+   * @param storage         {@link HoodieStorage} for reading records.
+   * @return {@link ClosableIterator<T>} that can return all records through iteration.
+   */
+  public ClosableIterator<T> getFileRecordIterator(
+      StoragePathInfo storagePathInfo, long start, long length, Schema dataSchema, Schema requiredSchema,
+      HoodieStorage storage) throws IOException {
+    return getFileRecordIterator(storagePathInfo.getPath(), start, length, dataSchema, requiredSchema, storage);
+  }
+
+  /**
    * Converts an Avro record, e.g., serialized in the log files, to an engine-specific record.
    *
    * @param avroRecord The Avro record.
@@ -177,11 +202,16 @@ public abstract class HoodieReaderContext<T> {
    */
   public abstract T convertAvroRecord(IndexedRecord avroRecord);
 
+  public abstract GenericRecord convertToAvroRecord(T record, Schema schema);
+  
   /**
-   * @param mergerStrategy Merger strategy UUID.
+   * @param mergeMode        record merge mode
+   * @param mergeStrategyId  record merge strategy ID
+   * @param mergeImplClasses custom implementation classes for record merging
+   *
    * @return {@link HoodieRecordMerger} to use.
    */
-  public abstract HoodieRecordMerger getRecordMerger(String mergerStrategy);
+  public abstract Option<HoodieRecordMerger> getRecordMerger(RecordMergeMode mergeMode, String mergeStrategyId, String mergeImplClasses);
 
   /**
    * Gets the field value.
@@ -192,6 +222,19 @@ public abstract class HoodieReaderContext<T> {
    * @return The field value.
    */
   public abstract Object getValue(T record, Schema schema, String fieldName);
+
+  /**
+   * Cast to Java boolean value.
+   * If the object is not compatible with boolean type, throws.
+   */
+  public boolean castToBoolean(Object value) {
+    if (value instanceof Boolean) {
+      return (boolean) value;
+    } else {
+      throw new IllegalArgumentException(
+          "Input value type " + value.getClass() + ", cannot be cast to boolean");
+    }
+  }
 
   /**
    * Gets the record key in String.
@@ -211,25 +254,25 @@ public abstract class HoodieReaderContext<T> {
    * @param recordOption An option of record.
    * @param metadataMap  A map containing the record metadata.
    * @param schema       The Avro schema of the record.
-   * @param props        Properties.
+   * @param orderingFieldName name of the ordering field
    * @return The ordering value.
    */
   public Comparable getOrderingValue(Option<T> recordOption,
                                      Map<String, Object> metadataMap,
                                      Schema schema,
-                                     TypedProperties props) {
+                                     Option<String> orderingFieldName) {
     if (metadataMap.containsKey(INTERNAL_META_ORDERING_FIELD)) {
       return (Comparable) metadataMap.get(INTERNAL_META_ORDERING_FIELD);
     }
 
-    if (!recordOption.isPresent()) {
-      return 0;
+    if (!recordOption.isPresent() || orderingFieldName.isEmpty()) {
+      return DEFAULT_ORDERING_VALUE;
     }
 
-    String orderingFieldName = ConfigUtils.getOrderingField(props);
-    Object value = getValue(recordOption.get(), schema, orderingFieldName);
-    return value != null ? (Comparable) value : 0;
-
+    Object value = getValue(recordOption.get(), schema, orderingFieldName.get());
+    Comparable finalOrderingVal = value != null ? convertValueToEngineType((Comparable) value) : DEFAULT_ORDERING_VALUE;
+    metadataMap.put(INTERNAL_META_ORDERING_FIELD, finalOrderingVal);
+    return finalOrderingVal;
   }
 
   /**
@@ -249,18 +292,6 @@ public abstract class HoodieReaderContext<T> {
    * @return The record containing the same data that do not change in memory over time.
    */
   public abstract T seal(T record);
-
-  /**
-   * Compares values in different types which can contain engine-specific types.
-   *
-   * @param o1 {@link Comparable} object.
-   * @param o2 other {@link Comparable} object to compare to.
-   * @return comparison result.
-   */
-  public int compareTo(Comparable o1, Comparable o2) {
-    throw new IllegalArgumentException("Cannot compare values in different types: "
-        + o1 + "(" + o1.getClass() + "), " + o2 + "(" + o2.getClass() + ")");
-  }
 
   /**
    * Generates metadata map based on the information.
@@ -289,8 +320,18 @@ public abstract class HoodieReaderContext<T> {
   public Map<String, Object> generateMetadataForRecord(T record, Schema schema) {
     Map<String, Object> meta = new HashMap<>();
     meta.put(INTERNAL_META_RECORD_KEY, getRecordKey(record, schema));
-    meta.put(INTERNAL_META_SCHEMA, schema);
+    meta.put(INTERNAL_META_SCHEMA_ID, encodeAvroSchema(schema));
     return meta;
+  }
+
+  /**
+   * Gets the schema encoded in the metadata map
+   *
+   * @param infoMap The record metadata
+   * @return the avro schema if it is encoded in the metadata map, else null
+   */
+  public Schema getSchemaFromMetadata(Map<String, Object> infoMap) {
+    return decodeAvroSchema(infoMap.get(INTERNAL_META_SCHEMA_ID));
   }
 
   /**
@@ -303,7 +344,7 @@ public abstract class HoodieReaderContext<T> {
   public Map<String, Object> updateSchemaAndResetOrderingValInMetadata(Map<String, Object> meta,
                                                                        Schema schema) {
     meta.remove(INTERNAL_META_ORDERING_FIELD);
-    meta.put(INTERNAL_META_SCHEMA, schema);
+    meta.put(INTERNAL_META_SCHEMA_ID, encodeAvroSchema(schema));
     return meta;
   }
 
@@ -337,6 +378,22 @@ public abstract class HoodieReaderContext<T> {
   }
 
   /**
+   * Returns the value to a type representation in a specific engine.
+   * <p>
+   * This can be overridden by the reader context implementation on a specific engine to handle
+   * engine-specific field type system.  For example, Spark uses {@code UTF8String} to represent
+   * {@link String} field values, so we need to convert the values to {@code UTF8String} type
+   * in Spark for proper value comparison.
+   *
+   * @param value {@link Comparable} value to be converted.
+   *
+   * @return the converted value in a type representation in a specific engine.
+   */
+  public Comparable convertValueToEngineType(Comparable value) {
+    return value;
+  }
+
+  /**
    * Extracts the record position value from the record itself.
    *
    * @return the record position in the base file.
@@ -358,9 +415,17 @@ public abstract class HoodieReaderContext<T> {
   }
 
   /**
-   * Constructs engine specific delete record.
+   * Encodes the given avro schema for efficient serialization.
    */
-  public T constructRawDeleteRecord(Map<String, Object> metadata) {
-    return null;
+  private Integer encodeAvroSchema(Schema schema) {
+    return this.localAvroSchemaCache.cacheSchema(schema);
+  }
+
+  /**
+   * Decodes the avro schema with given version ID.
+   */
+  @Nullable
+  private Schema decodeAvroSchema(Object versionId) {
+    return this.localAvroSchemaCache.getSchema((Integer) versionId).orElse(null);
   }
 }

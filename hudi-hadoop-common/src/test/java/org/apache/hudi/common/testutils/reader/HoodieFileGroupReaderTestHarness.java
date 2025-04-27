@@ -29,9 +29,12 @@ import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
+import org.apache.hudi.keygen.BaseKeyGenerator;
+import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 
+import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.fs.FileSystem;
 import org.junit.jupiter.api.AfterAll;
@@ -43,6 +46,7 @@ import java.util.Properties;
 import static org.apache.hudi.common.table.HoodieTableConfig.POPULATE_META_FIELDS;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.AVRO_SCHEMA;
 import static org.apache.hudi.common.testutils.HoodieTestUtils.getDefaultStorageConf;
+import static org.apache.hudi.common.testutils.reader.HoodieFileSliceTestUtils.ROW_KEY;
 
 public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
   protected static final String PARTITION_PATH = "any-partition-path";
@@ -55,13 +59,13 @@ public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
   protected static List<DataGenerationPlan.OperationType> operationTypes;
   // Set the instantTime for each record set.
   protected static List<String> instantTimes;
-  protected static List<Boolean> shouldWritePositions;
+  protected List<Boolean> shouldWritePositions;
 
   // Environmental variables.
   protected static StorageConfiguration<?> storageConf;
   protected static HoodieTestTable testTable;
-  protected static HoodieReaderContext<IndexedRecord> readerContext;
   protected static TypedProperties properties;
+  protected HoodieReaderContext<IndexedRecord> readerContext;
 
   static {
     // Note: Make `timestamp` as ordering field.
@@ -69,8 +73,6 @@ public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
     properties.setProperty(
         "hoodie.datasource.write.precombine.field", "timestamp");
     storageConf = getDefaultStorageConf();
-    readerContext = new HoodieTestReaderContext(
-        Option.empty(), Option.empty());
   }
 
   @AfterAll
@@ -86,9 +88,13 @@ public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
     return HoodieTableType.MERGE_ON_READ;
   }
 
+  protected Properties getMetaProps() {
+    return new Properties();
+  }
+
   @Override
   protected void initMetaClient() throws IOException {
-    Properties metaProps = new Properties();
+    Properties metaProps = getMetaProps();
     metaProps.setProperty(POPULATE_META_FIELDS.key(), "false");
     if (basePath == null) {
       initPath();
@@ -109,11 +115,18 @@ public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
 
   protected ClosableIterator<IndexedRecord> getFileGroupIterator(int numFiles, boolean shouldReadPositions)
       throws IOException, InterruptedException {
+    return getFileGroupIterator(numFiles, shouldReadPositions, false);
+  }
+
+  protected ClosableIterator<IndexedRecord> getFileGroupIterator(int numFiles, boolean shouldReadPositions, boolean allowInflightCommits)
+      throws IOException, InterruptedException {
     assert (numFiles >= 1 && numFiles <= keyRanges.size());
+
+    HoodieStorage hoodieStorage = new HoodieHadoopStorage(basePath, storageConf);
 
     Option<FileSlice> fileSliceOpt =
         HoodieFileSliceTestUtils.getFileSlice(
-            readerContext.getStorage(basePath, storageConf),
+            hoodieStorage,
             keyRanges.subList(0, numFiles),
             timestamps.subList(0, numFiles),
             operationTypes.subList(0, numFiles),
@@ -134,12 +147,28 @@ public class HoodieFileGroupReaderTestHarness extends HoodieCommonTestHarness {
             0L,
             Long.MAX_VALUE,
             properties,
-            new HoodieHadoopStorage(basePath, storageConf),
+            hoodieStorage,
             readerContext,
-            metaClient
-        );
+            metaClient,
+            allowInflightCommits);
 
     fileGroupReader.initRecordIterators();
     return fileGroupReader.getClosableIterator();
+  }
+
+  protected static class TestKeyGenerator extends BaseKeyGenerator {
+    public TestKeyGenerator() {
+      super(new TypedProperties());
+    }
+
+    @Override
+    public String getRecordKey(GenericRecord record) {
+      return record.get(ROW_KEY).toString();
+    }
+
+    @Override
+    public String getPartitionPath(GenericRecord record) {
+      return "";
+    }
   }
 }

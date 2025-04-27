@@ -53,10 +53,12 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.table.log.TestLogReaderUtils;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
+import org.apache.hudi.common.table.timeline.versioning.DefaultInstantGenerator;
 import org.apache.hudi.common.table.timeline.versioning.clean.CleanPlanV2MigrationHandler;
 import org.apache.hudi.common.util.CompactionUtils;
 import org.apache.hudi.common.util.FileIOUtils;
@@ -105,21 +107,25 @@ import static org.apache.hudi.common.model.WriteOperationType.CLUSTER;
 import static org.apache.hudi.common.model.WriteOperationType.COMPACT;
 import static org.apache.hudi.common.model.WriteOperationType.UPSERT;
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.CLEAN_ACTION;
+import static org.apache.hudi.common.table.timeline.HoodieTimeline.CLUSTERING_ACTION;
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.REPLACE_COMMIT_ACTION;
 import static org.apache.hudi.common.testutils.FileCreateUtils.baseFileName;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createCleanFile;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createDeltaCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightCleanFile;
+import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightClusterCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightCompaction;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightDeltaCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightReplaceCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightRollbackFile;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createInflightSavepoint;
+import static org.apache.hudi.common.testutils.FileCreateUtils.createLogFileMarker;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createMarkerFile;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createReplaceCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createRequestedCleanFile;
+import static org.apache.hudi.common.testutils.FileCreateUtils.createRequestedClusterCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createRequestedCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createRequestedDeltaCommit;
 import static org.apache.hudi.common.testutils.FileCreateUtils.createRequestedReplaceCommit;
@@ -138,7 +144,7 @@ import static org.apache.hudi.common.util.StringUtils.EMPTY_STRING;
 /**
  * Test Hoodie Table for testing only.
  */
-public class HoodieTestTable {
+public class HoodieTestTable implements AutoCloseable {
 
   public static final String PHONY_TABLE_SCHEMA =
       "{\"namespace\": \"org.apache.hudi.avro.model\", \"type\": \"record\", \"name\": \"PhonyRecord\", \"fields\": []}";
@@ -156,6 +162,7 @@ public class HoodieTestTable {
   protected String currentInstantTime;
   private boolean isNonPartitioned = false;
   protected Option<HoodieEngineContext> context;
+  protected final InstantGenerator instantGenerator = new DefaultInstantGenerator();
 
   protected HoodieTestTable(String basePath, HoodieStorage storage,
                             HoodieTableMetaClient metaClient) {
@@ -166,7 +173,7 @@ public class HoodieTestTable {
                             HoodieTableMetaClient metaClient, Option<HoodieEngineContext> context) {
     ValidationUtils.checkArgument(Objects.equals(basePath, metaClient.getBasePath().toString()));
     ValidationUtils.checkArgument(Objects.equals(
-        storage.getFileSystem(), metaClient.getRawHoodieStorage().getFileSystem()));
+        storage.getFileSystem(), metaClient.getRawStorage().getFileSystem()));
     this.basePath = basePath;
     this.storage = storage;
     this.fs = (FileSystem) storage.getFileSystem();
@@ -177,7 +184,7 @@ public class HoodieTestTable {
 
   public static HoodieTestTable of(HoodieTableMetaClient metaClient) {
     testTableState = HoodieTestTableState.of();
-    return new HoodieTestTable(metaClient.getBasePath().toString(), metaClient.getRawHoodieStorage(), metaClient);
+    return new HoodieTestTable(metaClient.getBasePath().toString(), metaClient.getRawStorage(), metaClient);
   }
 
   public void setNonPartitioned() {
@@ -197,7 +204,7 @@ public class HoodieTestTable {
   }
 
   public static String makeNewCommitTime(Instant dateTime) {
-    return HoodieActiveTimeline.formatDate(Date.from(dateTime));
+    return TimelineUtils.formatDate(Date.from(dateTime));
   }
 
   public static List<String> makeIncrementalCommitTimes(int num, int firstOffsetSeconds, int deltaSecs) {
@@ -208,22 +215,22 @@ public class HoodieTestTable {
   }
 
   public HoodieTestTable addRequestedCommit(String instantTime) throws Exception {
-    createRequestedCommit(basePath, instantTime);
+    createRequestedCommit(metaClient, instantTime);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addInflightCommit(String instantTime) throws Exception {
-    createRequestedCommit(basePath, instantTime);
-    createInflightCommit(basePath, instantTime);
+    createRequestedCommit(metaClient, instantTime);
+    createInflightCommit(metaClient, instantTime);
     inflightCommits.add(instantTime);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addInflightDeltaCommit(String instantTime) throws Exception {
-    createRequestedDeltaCommit(basePath, instantTime);
-    createInflightDeltaCommit(basePath, instantTime);
+    createRequestedDeltaCommit(metaClient, instantTime);
+    createInflightDeltaCommit(metaClient, instantTime);
     inflightCommits.add(instantTime);
     currentInstantTime = instantTime;
     return this;
@@ -238,16 +245,16 @@ public class HoodieTestTable {
   }
 
   public HoodieTestTable addCommit(String instantTime, Option<String> completionTime, Option<HoodieCommitMetadata> metadata) throws Exception {
-    createRequestedCommit(basePath, instantTime);
-    createInflightCommit(basePath, instantTime);
-    createCommit(basePath, instantTime, completionTime, metadata);
+    createRequestedCommit(metaClient, instantTime);
+    createInflightCommit(metaClient, instantTime);
+    createCommit(metaClient, metaClient.getTimelineLayout().getCommitMetadataSerDe(), instantTime, completionTime, metadata);
     currentInstantTime = instantTime;
     return this;
   }
 
-  public HoodieTestTable addSavepointCommit(String instantTime, HoodieSavepointMetadata savepointMetadata) throws IOException {
-    createInflightSavepoint(basePath, instantTime);
-    createSavepointCommit(basePath, instantTime, savepointMetadata);
+  public HoodieTestTable addSavepointCommit(String instantTime, Option<String> completeTime, HoodieSavepointMetadata savepointMetadata) throws IOException {
+    createInflightSavepoint(metaClient, instantTime);
+    createSavepointCommit(metaClient, instantTime, completeTime, savepointMetadata);
     return this;
   }
 
@@ -286,9 +293,9 @@ public class HoodieTestTable {
 
   public HoodieTestTable moveInflightCommitToComplete(String instantTime, HoodieCommitMetadata metadata) throws IOException {
     if (metaClient.getTableType() == HoodieTableType.COPY_ON_WRITE) {
-      createCommit(basePath, instantTime, Option.of(metadata));
+      createCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, Option.of(metadata));
     } else {
-      createDeltaCommit(basePath, instantTime, metadata);
+      createDeltaCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, Option.empty(), metadata);
     }
     inflightCommits.remove(instantTime);
     currentInstantTime = instantTime;
@@ -297,24 +304,32 @@ public class HoodieTestTable {
 
   public void moveCompleteCommitToInflight(String instantTime) throws IOException {
     if (metaClient.getTableType() == HoodieTableType.COPY_ON_WRITE) {
-      FileCreateUtils.deleteCommit(basePath, instantTime);
+      FileCreateUtils.deleteCommit(metaClient, instantTime);
     } else {
-      FileCreateUtils.deleteDeltaCommit(basePath, instantTime);
+      FileCreateUtils.deleteDeltaCommit(metaClient, instantTime);
     }
   }
 
   public HoodieTestTable addDeltaCommit(String instantTime) throws Exception {
-    createRequestedDeltaCommit(basePath, instantTime);
-    createInflightDeltaCommit(basePath, instantTime);
-    createDeltaCommit(basePath, instantTime);
+    createRequestedDeltaCommit(metaClient, instantTime);
+    createInflightDeltaCommit(metaClient, instantTime);
+    createDeltaCommit(metaClient, instantTime);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addDeltaCommit(String instantTime, HoodieCommitMetadata metadata) throws Exception {
-    createRequestedDeltaCommit(basePath, instantTime);
-    createInflightDeltaCommit(basePath, instantTime);
-    createDeltaCommit(basePath, instantTime, metadata);
+    createRequestedDeltaCommit(metaClient, instantTime);
+    createInflightDeltaCommit(metaClient, instantTime);
+    createDeltaCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, Option.empty(), metadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addDeltaCommit(String instantTime, Option<String> completeTime, HoodieCommitMetadata metadata) throws Exception {
+    createRequestedDeltaCommit(metaClient, instantTime);
+    createInflightDeltaCommit(metaClient, instantTime);
+    createDeltaCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, completeTime, metadata);
     currentInstantTime = instantTime;
     return this;
   }
@@ -324,49 +339,115 @@ public class HoodieTestTable {
       Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata,
       Option<HoodieCommitMetadata> inflightReplaceMetadata,
       HoodieReplaceCommitMetadata completeReplaceMetadata) throws Exception {
-    createRequestedReplaceCommit(basePath, instantTime, requestedReplaceMetadata);
-    createInflightReplaceCommit(basePath, instantTime, inflightReplaceMetadata);
-    createReplaceCommit(basePath, instantTime, completeReplaceMetadata);
+    return addReplaceCommit(instantTime, Option.empty(), requestedReplaceMetadata, inflightReplaceMetadata, completeReplaceMetadata);
+  }
+
+  public HoodieTestTable addReplaceCommit(
+      String instantTime,
+      Option<String> completeTime,
+      Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata,
+      Option<HoodieCommitMetadata> inflightReplaceMetadata,
+      HoodieReplaceCommitMetadata completeReplaceMetadata) throws Exception {
+    createRequestedReplaceCommit(metaClient, instantTime, requestedReplaceMetadata);
+    createInflightReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    createReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, completeTime, completeReplaceMetadata);
     currentInstantTime = instantTime;
     return this;
   }
 
-  public HoodieTestTable addPendingReplace(String instantTime, Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata, Option<HoodieCommitMetadata> inflightReplaceMetadata) throws Exception {
-    createRequestedReplaceCommit(basePath, instantTime, requestedReplaceMetadata);
-    createInflightReplaceCommit(basePath, instantTime, inflightReplaceMetadata);
+  public HoodieTestTable addPendingReplace(
+      String instantTime, Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata, Option<HoodieCommitMetadata> inflightReplaceMetadata) throws Exception {
+    createRequestedReplaceCommit(metaClient, instantTime, requestedReplaceMetadata);
+    createInflightReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addPendingCluster(String instantTime, HoodieRequestedReplaceMetadata requestedReplaceMetadata, Option<HoodieReplaceCommitMetadata> inflightReplaceMetadata) throws Exception {
+    createRequestedClusterCommit(metaClient, instantTime, requestedReplaceMetadata);
+    createInflightClusterCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addRequestedCluster(String instantTime, HoodieRequestedReplaceMetadata requestedReplaceMetadata) throws Exception {
+    createRequestedClusterCommit(metaClient, instantTime, requestedReplaceMetadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addInflightCluster(String instantTime, Option<HoodieReplaceCommitMetadata> inflightReplaceMetadata) throws Exception {
+    createInflightClusterCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addCluster(
+      String instantTime,
+      HoodieRequestedReplaceMetadata requestedReplaceMetadata,
+      Option<HoodieReplaceCommitMetadata> inflightReplaceMetadata,
+      HoodieReplaceCommitMetadata completeReplaceMetadata) throws Exception {
+    createRequestedClusterCommit(metaClient, instantTime, requestedReplaceMetadata);
+    createInflightClusterCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    createReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, completeReplaceMetadata);
+    currentInstantTime = instantTime;
+    return this;
+  }
+
+  public HoodieTestTable addCluster(
+      String instantTime,
+      HoodieRequestedReplaceMetadata requestedReplaceMetadata,
+      Option<HoodieReplaceCommitMetadata> inflightReplaceMetadata,
+      HoodieReplaceCommitMetadata completeReplaceMetadata,
+      String completionTime) throws Exception {
+    createRequestedClusterCommit(metaClient, instantTime, requestedReplaceMetadata);
+    createInflightClusterCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
+    createReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, completionTime, completeReplaceMetadata);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addRequestedReplace(String instantTime, Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata) throws Exception {
-    createRequestedReplaceCommit(basePath, instantTime, requestedReplaceMetadata);
+    createRequestedReplaceCommit(metaClient, instantTime, requestedReplaceMetadata);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addInflightReplace(String instantTime, Option<HoodieCommitMetadata> inflightReplaceMetadata) throws Exception {
-    createInflightReplaceCommit(basePath, instantTime, inflightReplaceMetadata);
+    createInflightReplaceCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, inflightReplaceMetadata);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addInflightClean(String instantTime, HoodieCleanerPlan cleanerPlan) throws IOException {
-    createRequestedCleanFile(basePath, instantTime, cleanerPlan);
-    createInflightCleanFile(basePath, instantTime, cleanerPlan);
+    createRequestedCleanFile(metaClient, instantTime, cleanerPlan);
+    createInflightCleanFile(metaClient, instantTime, cleanerPlan);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addClean(String instantTime, HoodieCleanerPlan cleanerPlan, HoodieCleanMetadata metadata) throws IOException {
-    return addClean(instantTime, cleanerPlan, metadata, false, false);
+    return addClean(instantTime, Option.empty(), cleanerPlan, metadata, false, false);
   }
 
-  public HoodieTestTable addClean(String instantTime, HoodieCleanerPlan cleanerPlan, HoodieCleanMetadata metadata, boolean isEmptyForAll, boolean isEmptyCompleted) throws IOException {
-    createRequestedCleanFile(basePath, instantTime, cleanerPlan, isEmptyForAll);
-    createInflightCleanFile(basePath, instantTime, cleanerPlan, isEmptyForAll);
-    createCleanFile(basePath, instantTime, metadata, isEmptyCompleted);
+  public HoodieTestTable addClean(String instantTime, Option<String> completeTime, HoodieCleanerPlan cleanerPlan, HoodieCleanMetadata metadata) throws IOException {
+    return addClean(instantTime, completeTime, cleanerPlan, metadata, false, false);
+  }
+
+  public HoodieTestTable addClean(
+      String instantTime, Option<String> completeTime, HoodieCleanerPlan cleanerPlan, HoodieCleanMetadata metadata,
+      boolean isEmptyForAll, boolean isEmptyCompleted) throws IOException {
+    createRequestedCleanFile(metaClient, instantTime, cleanerPlan, isEmptyForAll);
+    createInflightCleanFile(metaClient, instantTime, cleanerPlan, isEmptyForAll);
+    createCleanFile(metaClient, instantTime, completeTime, metadata, isEmptyCompleted);
     currentInstantTime = instantTime;
     return this;
+  }
+
+  public HoodieTestTable addClean(
+      String instantTime, HoodieCleanerPlan cleanerPlan, HoodieCleanMetadata metadata,
+      boolean isEmptyForAll, boolean isEmptyCompleted) throws IOException {
+    return addClean(instantTime, Option.empty(), cleanerPlan, metadata, isEmptyForAll, isEmptyCompleted);
   }
 
   public HoodieTestTable addClean(String instantTime) throws IOException {
@@ -396,41 +477,41 @@ public class HoodieTestTable {
   }
 
   public HoodieTestTable addRequestedRollback(String instantTime, HoodieRollbackPlan plan) throws IOException {
-    createRequestedRollbackFile(basePath, instantTime, plan);
+    createRequestedRollbackFile(metaClient, instantTime, plan);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addInflightRollback(String instantTime) throws IOException {
-    createInflightRollbackFile(basePath, instantTime);
+    createInflightRollbackFile(metaClient, instantTime);
     currentInstantTime = instantTime;
     return this;
   }
 
-  public HoodieTestTable addRollback(String instantTime, HoodieRollbackMetadata rollbackMetadata,HoodieRollbackPlan rollbackPlan) throws IOException {
+  public HoodieTestTable addRollback(String instantTime, HoodieRollbackMetadata rollbackMetadata, HoodieRollbackPlan rollbackPlan) throws IOException {
     return addRollback(instantTime, rollbackMetadata, false, rollbackPlan);
   }
 
   public HoodieTestTable addRollback(String instantTime, HoodieRollbackMetadata rollbackMetadata, boolean isEmpty, HoodieRollbackPlan rollbackPlan) throws IOException {
     if (rollbackPlan != null) {
-      createRequestedRollbackFile(basePath, instantTime, rollbackPlan);
+      createRequestedRollbackFile(metaClient, instantTime, rollbackPlan);
     } else {
-      createRequestedRollbackFile(basePath, instantTime);
+      createRequestedRollbackFile(metaClient, instantTime);
     }
-    createInflightRollbackFile(basePath, instantTime);
-    // createRollbackFile(basePath, instantTime, rollbackMetadata, isEmpty);
+    createInflightRollbackFile(metaClient, instantTime);
+    // createRollbackFile(metaClient, instantTime, rollbackMetadata, isEmpty);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addRollbackCompleted(String instantTime, HoodieRollbackMetadata rollbackMetadata, boolean isEmpty) throws IOException {
-    createRollbackFile(basePath, instantTime, rollbackMetadata, isEmpty);
+    createRollbackFile(metaClient, instantTime, rollbackMetadata, isEmpty);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addRestore(String instantTime, HoodieRestoreMetadata restoreMetadata) throws IOException {
-    createRestoreFile(basePath, instantTime, restoreMetadata);
+    createRestoreFile(metaClient, instantTime, restoreMetadata);
     currentInstantTime = instantTime;
     return this;
   }
@@ -449,7 +530,7 @@ public class HoodieTestTable {
         long rollbackLogFileSize = 50 + RANDOM.nextInt(500);
         String fileId = UUID.randomUUID().toString();
         String logFileName = logFileName(instantTimeToDelete, fileId, 0);
-        FileCreateUtils.createLogFile(basePath, entry.getKey(), instantTimeToDelete, fileId, 0, (int) rollbackLogFileSize);
+        FileCreateUtils.createLogFile(metaClient, entry.getKey(), instantTimeToDelete, fileId, 0, (int) rollbackLogFileSize);
         rollbackPartitionMetadata.setRollbackLogFiles(singletonMap(logFileName, rollbackLogFileSize));
       }
       partitionMetadataMap.put(entry.getKey(), rollbackPartitionMetadata);
@@ -496,29 +577,27 @@ public class HoodieTestTable {
     return savepointMetadata;
   }
 
-  public HoodieTestTable addRequestedCompaction(String instantTime) throws IOException {
+  public HoodieTestTable addRequestedCompaction(String instantTime) {
     List<FileSlice> fileSlices = new ArrayList<>();
     fileSlices.add(new FileSlice("par1", instantTime, "fg-1"));
     fileSlices.add(new FileSlice("par2", instantTime, "fg-2"));
     HoodieCompactionPlan compactionPlan = CompactionUtils
         .buildFromFileSlices(fileSlices.stream().map(fs -> Pair.of(fs.getPartitionPath(), fs))
             .collect(Collectors.toList()), Option.empty(), Option.empty());
-    HoodieInstant compactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, instantTime);
-    metaClient.getActiveTimeline().saveToCompactionRequested(compactionInstant,
-        TimelineMetadataUtils.serializeCompactionPlan(compactionPlan));
+    HoodieInstant compactionInstant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, instantTime);
+    metaClient.getActiveTimeline().saveToCompactionRequested(compactionInstant, compactionPlan);
     currentInstantTime = instantTime;
     return this;
   }
 
-  public HoodieTestTable addRequestedCompaction(String instantTime, HoodieCompactionPlan compactionPlan) throws IOException {
-    HoodieInstant compactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, instantTime);
-    metaClient.getActiveTimeline().saveToCompactionRequested(compactionInstant,
-        TimelineMetadataUtils.serializeCompactionPlan(compactionPlan));
+  public HoodieTestTable addRequestedCompaction(String instantTime, HoodieCompactionPlan compactionPlan) {
+    HoodieInstant compactionInstant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, instantTime);
+    metaClient.getActiveTimeline().saveToCompactionRequested(compactionInstant, compactionPlan);
     currentInstantTime = instantTime;
     return this;
   }
 
-  public HoodieTestTable addRequestedCompaction(String instantTime, FileSlice... fileSlices) throws IOException {
+  public HoodieTestTable addRequestedCompaction(String instantTime, FileSlice... fileSlices) {
     HoodieCompactionPlan plan = CompactionUtils
         .buildFromFileSlices(Arrays.stream(fileSlices).map(fs -> Pair.of(fs.getPartitionPath(), fs))
             .collect(Collectors.toList()), Option.empty(), Option.empty());
@@ -533,7 +612,7 @@ public class HoodieTestTable {
       }
     }
     this.addRequestedCompaction(instantTime, fileSlices.toArray(new FileSlice[0]));
-    createInflightCompaction(basePath, instantTime);
+    createInflightCompaction(metaClient, instantTime);
     inflightCommits.add(instantTime);
     currentInstantTime = instantTime;
     return this;
@@ -542,7 +621,14 @@ public class HoodieTestTable {
   public HoodieTestTable addCompaction(String instantTime, HoodieCommitMetadata commitMetadata) throws Exception {
     addInflightCompaction(instantTime, commitMetadata);
     this.inflightCommits.remove(instantTime);
-    createCommit(basePath, instantTime, Option.of(commitMetadata));
+    createCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, Option.of(commitMetadata));
+    return this;
+  }
+
+  public HoodieTestTable addCompaction(String instantTime, Option<String> completeTime, HoodieCommitMetadata commitMetadata) throws Exception {
+    addInflightCompaction(instantTime, commitMetadata);
+    this.inflightCommits.remove(instantTime);
+    createCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, completeTime, Option.of(commitMetadata));
     return this;
   }
 
@@ -573,6 +659,7 @@ public class HoodieTestTable {
         .setInputGroups(clusteringGroups).build());
 
     HoodieReplaceCommitMetadata replaceMetadata = new HoodieReplaceCommitMetadata();
+    replaceMetadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, HoodieTestTable.PHONY_TABLE_SCHEMA);
     replacedFileIds.forEach(replacedFileId -> replaceMetadata.addReplaceFileId(partition, replacedFileId));
     replaceMetadata.setOperationType(operationType);
     if (newFileId.isPresent() && !StringUtils.isNullOrEmpty(newFileId.get())) {
@@ -588,20 +675,24 @@ public class HoodieTestTable {
   }
 
   public HoodieTestTable moveInflightCompactionToComplete(String instantTime, HoodieCommitMetadata metadata) throws IOException {
-    createCommit(basePath, instantTime, Option.of(metadata));
+    createCommit(metaClient, metaClient.getCommitMetadataSerDe(), instantTime, Option.of(metadata));
     inflightCommits.remove(instantTime);
     currentInstantTime = instantTime;
     return this;
   }
 
   public HoodieTestTable addSavepoint(String instantTime, HoodieSavepointMetadata savepointMetadata) throws IOException {
-    createInflightSavepoint(basePath, instantTime);
-    createSavepointCommit(basePath, instantTime, savepointMetadata);
+    return addSavepoint(instantTime, Option.empty(), savepointMetadata);
+  }
+
+  public HoodieTestTable addSavepoint(String instantTime, Option<String> completeTime, HoodieSavepointMetadata savepointMetadata) throws IOException {
+    createInflightSavepoint(metaClient, instantTime);
+    createSavepointCommit(metaClient, instantTime, completeTime, savepointMetadata);
     return this;
   }
 
   public HoodieTestTable deleteSavepoint(String instantTime) throws IOException {
-    deleteSavepointCommit(basePath, instantTime, storage);
+    deleteSavepointCommit(metaClient, instantTime, storage);
     return this;
   }
 
@@ -635,7 +726,7 @@ public class HoodieTestTable {
   }
 
   public HoodieTestTable withMarkerFile(String partitionPath, String fileId, IOType ioType) throws IOException {
-    createMarkerFile(basePath, partitionPath, currentInstantTime, fileId, ioType);
+    createMarkerFile(metaClient, partitionPath, currentInstantTime, fileId, ioType);
     return this;
   }
 
@@ -646,7 +737,7 @@ public class HoodieTestTable {
 
   public HoodieTestTable withMarkerFiles(String partitionPath, String[] fileIds, IOType ioType) throws IOException {
     for (String fileId : fileIds) {
-      createMarkerFile(basePath, partitionPath, currentInstantTime, fileId, ioType);
+      createMarkerFile(metaClient, partitionPath, currentInstantTime, fileId, ioType);
     }
     return this;
   }
@@ -654,7 +745,18 @@ public class HoodieTestTable {
   public HoodieTestTable withLogMarkerFile(String partitionPath, String fileId, IOType ioType) throws IOException {
     String logFileName = FSUtils.makeLogFileName(fileId, HoodieLogFile.DELTA_EXTENSION, currentInstantTime, HoodieLogFile.LOGFILE_BASE_VERSION, HoodieLogFormat.UNKNOWN_WRITE_TOKEN);
     String markerFileName = FileCreateUtils.markerFileName(logFileName, ioType);
-    FileCreateUtils.createMarkerFile(basePath, partitionPath, currentInstantTime, markerFileName);
+    FileCreateUtils.createMarkerFile(metaClient, partitionPath, currentInstantTime, markerFileName);
+    return this;
+  }
+
+  public HoodieTestTable withLogMarkerFile(String baseInstantTime, String partitionPath, String fileId, IOType ioType, int logVersion)
+      throws IOException {
+    createLogFileMarker(basePath, partitionPath, baseInstantTime, currentInstantTime, fileId, ioType, logVersion);
+    return this;
+  }
+
+  public HoodieTestTable withLogMarkerFile(String partitionPath, String fileName) throws IOException {
+    createLogFileMarker(metaClient, partitionPath, currentInstantTime, fileName);
     return this;
   }
 
@@ -667,7 +769,7 @@ public class HoodieTestTable {
     Map<String, String> partitionFileIdMap = new HashMap<>();
     for (String p : partitions) {
       String fileId = UUID.randomUUID().toString();
-      FileCreateUtils.createBaseFile(basePath, p, currentInstantTime, fileId);
+      FileCreateUtils.createBaseFile(metaClient, p, currentInstantTime, fileId);
       partitionFileIdMap.put(p, fileId);
     }
     return partitionFileIdMap;
@@ -684,7 +786,7 @@ public class HoodieTestTable {
   public Pair<HoodieTestTable, List<String>> withBaseFilesInPartition(String partition, String... fileIds) throws Exception {
     List<String> files = new ArrayList<>();
     for (String f : fileIds) {
-      files.add(FileCreateUtils.createBaseFile(basePath, partition, currentInstantTime, f));
+      files.add(FileCreateUtils.createBaseFile(metaClient, partition, currentInstantTime, f));
     }
     return Pair.of(this, files);
   }
@@ -692,14 +794,14 @@ public class HoodieTestTable {
   public HoodieTestTable withBaseFilesInPartition(String partition, int... lengths) throws Exception {
     for (int l : lengths) {
       String fileId = UUID.randomUUID().toString();
-      FileCreateUtils.createBaseFile(basePath, partition, currentInstantTime, fileId, l);
+      FileCreateUtils.createBaseFile(metaClient, partition, currentInstantTime, fileId, l);
     }
     return this;
   }
 
   public HoodieTestTable withBaseFilesInPartition(String partition, List<Pair<String, Integer>> fileInfos) throws Exception {
     for (Pair<String, Integer> fileInfo : fileInfos) {
-      FileCreateUtils.createBaseFile(basePath, partition, currentInstantTime, fileInfo.getKey(), fileInfo.getValue());
+      FileCreateUtils.createBaseFile(metaClient, partition, currentInstantTime, fileInfo.getKey(), fileInfo.getValue());
     }
     return this;
   }
@@ -715,16 +817,44 @@ public class HoodieTestTable {
   }
 
   public Pair<HoodieTestTable, List<String>> withLogFile(String partitionPath, String fileId, int... versions) throws Exception {
+    return withLogFile(partitionPath, fileId, currentInstantTime, versions);
+  }
+
+  public Pair<HoodieTestTable, List<String>> withLogFile(String partitionPath, String fileId,
+                                                         String instantTime, int... versions) throws Exception {
     List<String> logFiles = new ArrayList<>();
     for (int version : versions) {
-      logFiles.add(FileCreateUtils.createLogFile(basePath, partitionPath, currentInstantTime, fileId, version));
+      logFiles.add(FileCreateUtils.createLogFile(metaClient, partitionPath, instantTime, fileId, version));
     }
     return Pair.of(this, logFiles);
   }
 
+  /**
+   * Writes log files in the partition.
+   *
+   * @param partition partition to write log files
+   * @param fileInfos list of pairs of file ID, log version, and file size of the log files
+   * @return {@link HoodieTestTable} instance
+   * @throws Exception upon error
+   */
   public HoodieTestTable withLogFilesInPartition(String partition, List<Pair<String, Integer[]>> fileInfos) throws Exception {
-    for (Pair<String, Integer[]> fileInfo : fileInfos) {
-      FileCreateUtils.createLogFile(basePath, partition, currentInstantTime, fileInfo.getKey(), fileInfo.getValue()[0], fileInfo.getValue()[1]);
+    return withLogFilesAndBaseInstantTimeInPartition(partition,
+        fileInfos.stream().map(e -> Pair.of(Pair.of(currentInstantTime, e.getLeft()), e.getRight())).collect(Collectors.toList()));
+  }
+
+  /**
+   * Writes log files in the partition.
+   *
+   * @param partition partition to write log files
+   * @param fileInfos list of pairs of base instant time, file ID, log version, and file size of the log files
+   * @return {@link HoodieTestTable} instance
+   * @throws Exception upon error
+   */
+  public HoodieTestTable withLogFilesAndBaseInstantTimeInPartition(String partition, List<Pair<Pair<String, String>, Integer[]>> fileInfos)
+      throws Exception {
+    for (Pair<Pair<String, String>, Integer[]> fileInfo : fileInfos) {
+      FileCreateUtils.createLogFile(
+          metaClient, partition, fileInfo.getKey().getKey(), fileInfo.getKey().getValue(), fileInfo.getValue()[0], fileInfo.getValue()[1]);
     }
     return this;
   }
@@ -776,17 +906,16 @@ public class HoodieTestTable {
   }
 
   public Path getInflightCommitFilePath(String instantTime) {
-    return new Path(Paths.get(basePath, HoodieTableMetaClient.METAFOLDER_NAME,
+    return new Path(Paths.get(metaClient.getTimelinePath().toUri().getPath(),
         instantTime + HoodieTimeline.INFLIGHT_COMMIT_EXTENSION).toUri());
   }
 
   public StoragePath getCommitFilePath(String instantTime) {
-    return HoodieTestUtils.getCompleteInstantPath(storage, new StoragePath(basePath,
-        HoodieTableMetaClient.METAFOLDER_NAME), instantTime, HoodieTimeline.COMMIT_ACTION);
+    return HoodieTestUtils.getCompleteInstantPath(storage, metaClient.getTimelinePath(), instantTime, HoodieTimeline.COMMIT_ACTION);
   }
 
   public Path getRequestedCompactionFilePath(String instantTime) {
-    return new Path(Paths.get(basePath, HoodieTableMetaClient.AUXILIARYFOLDER_NAME,
+    return new Path(Paths.get(metaClient.getMetaAuxiliaryPath(),
         instantTime + HoodieTimeline.REQUESTED_COMPACTION_EXTENSION).toUri());
   }
 
@@ -808,11 +937,15 @@ public class HoodieTestTable {
   }
 
   public Path getLogFilePath(String partition, String fileId, int version) {
-    return new Path(Paths.get(basePath, partition, getLogFileNameById(fileId, version)).toString());
+    return new Path(Paths.get(basePath, partition, getLogFileNameById(currentInstantTime, fileId, version)).toString());
   }
 
   public String getLogFileNameById(String fileId, int version) {
     return logFileName(currentInstantTime, fileId, version);
+  }
+
+  public String getLogFileNameById(String baseInstantTime, String fileId, int version) {
+    return logFileName(baseInstantTime, fileId, version);
   }
 
   public List<String> getEarliestFilesInPartition(String partition, int count) throws IOException {
@@ -908,7 +1041,7 @@ public class HoodieTestTable {
   }
 
   public FileStatus[] listAllFilesInTempFolder() throws IOException {
-    return listRecursive(fs, new Path(Paths.get(basePath, HoodieTableMetaClient.TEMPFOLDER_NAME).toString())).toArray(new FileStatus[0]);
+    return listRecursive(fs, new Path(metaClient.getTempFolderPath())).toArray(new FileStatus[0]);
   }
 
   public void deleteFilesInPartition(String partitionPath, List<String> filesToDelete) throws IOException {
@@ -978,11 +1111,11 @@ public class HoodieTestTable {
     for (HoodieInstant commitInstantToRollback : commitsToRollback) {
       Option<HoodieCommitMetadata> commitMetadata = getCommitMeta(commitInstantToRollback);
       if (!commitMetadata.isPresent()) {
-        throw new IllegalArgumentException("Instant to rollback not present in timeline: " + commitInstantToRollback.getTimestamp());
+        throw new IllegalArgumentException("Instant to rollback not present in timeline: " + commitInstantToRollback.requestedTime());
       }
       Map<String, List<String>> partitionFiles = getPartitionFiles(commitMetadata.get());
-      rollbackMetadataMap.put(commitInstantToRollback.getTimestamp(),
-          Collections.singletonList(getRollbackMetadata(commitInstantToRollback.getTimestamp(), partitionFiles, false)));
+      rollbackMetadataMap.put(commitInstantToRollback.requestedTime(),
+          Collections.singletonList(getRollbackMetadata(commitInstantToRollback.requestedTime(), partitionFiles, false)));
       for (Map.Entry<String, List<String>> entry : partitionFiles.entrySet()) {
         deleteFilesInPartition(entry.getKey(), entry.getValue());
       }
@@ -1012,11 +1145,20 @@ public class HoodieTestTable {
     HoodieReplaceCommitMetadata replaceMetadata =
         (HoodieReplaceCommitMetadata) buildMetadata(writeStats, partitionToReplaceFileIds, Option.empty(), CLUSTER, PHONY_TABLE_SCHEMA,
             REPLACE_COMMIT_ACTION);
-    addReplaceCommit(commitTime, Option.empty(), Option.empty(), replaceMetadata);
+    HoodieRequestedReplaceMetadata requestedReplaceMetadata = HoodieRequestedReplaceMetadata.newBuilder()
+        .setOperationType(WriteOperationType.CLUSTER.name())
+        .setExtraMetadata(Collections.emptyMap())
+        .setClusteringPlan(new HoodieClusteringPlan())
+        .build();
+    addCluster(commitTime, requestedReplaceMetadata, Option.empty(), replaceMetadata);
     return replaceMetadata;
   }
 
   public HoodieCleanMetadata doClean(String commitTime, Map<String, Integer> partitionFileCountsToDelete) throws IOException {
+    return doClean(commitTime, partitionFileCountsToDelete, Collections.emptyMap());
+  }
+
+  public HoodieCleanMetadata doClean(String commitTime, Map<String, Integer> partitionFileCountsToDelete, Map<String, String> extraMetadata) throws IOException {
     Map<String, List<String>> partitionFilesToDelete = new HashMap<>();
     for (Map.Entry<String, Integer> entry : partitionFileCountsToDelete.entrySet()) {
       partitionFilesToDelete.put(entry.getKey(), getEarliestFilesInPartition(entry.getKey(), entry.getValue()));
@@ -1027,8 +1169,11 @@ public class HoodieTestTable {
       deleteFilesInPartition(entry.getKey(), entry.getValue());
     }
     Pair<HoodieCleanerPlan, HoodieCleanMetadata> cleanerMeta = getHoodieCleanMetadata(commitTime, testTableState);
-    addClean(commitTime, cleanerMeta.getKey(), cleanerMeta.getValue());
-    return cleanerMeta.getValue();
+    HoodieCleanMetadata cleanMetadata = cleanerMeta.getValue();
+    cleanerMeta.getKey().setExtraMetadata(extraMetadata);
+    cleanMetadata.setExtraMetadata(extraMetadata);
+    addClean(commitTime, cleanerMeta.getKey(), cleanMetadata);
+    return cleanMetadata;
   }
 
   /**
@@ -1179,10 +1324,10 @@ public class HoodieTestTable {
     return commitMetadata;
   }
 
-  private Option<HoodieCommitMetadata> getMetadataForInstant(String instantTime) {
+  public Option<HoodieCommitMetadata> getMetadataForInstant(String instantTime) {
     metaClient = HoodieTableMetaClient.reload(metaClient);
     Option<HoodieInstant> hoodieInstant = metaClient.getActiveTimeline().getCommitsTimeline()
-        .filterCompletedInstants().filter(i -> i.getTimestamp().equals(instantTime)).firstInstant();
+        .filterCompletedInstants().filter(i -> i.requestedTime().equals(instantTime)).firstInstant();
     try {
       if (hoodieInstant.isPresent()) {
         return getCommitMeta(hoodieInstant.get());
@@ -1196,15 +1341,14 @@ public class HoodieTestTable {
 
   private Option<HoodieCommitMetadata> getCommitMeta(HoodieInstant hoodieInstant) throws IOException {
     switch (hoodieInstant.getAction()) {
-      case HoodieTimeline.REPLACE_COMMIT_ACTION:
-        HoodieReplaceCommitMetadata replaceCommitMetadata = HoodieReplaceCommitMetadata
-            .fromBytes(metaClient.getActiveTimeline().getInstantDetails(hoodieInstant).get(), HoodieReplaceCommitMetadata.class);
-        return Option.of(replaceCommitMetadata);
+      case REPLACE_COMMIT_ACTION:
+      case CLUSTERING_ACTION:
+        return Option.of(
+            metaClient.getActiveTimeline().readReplaceCommitMetadata(hoodieInstant));
       case HoodieTimeline.DELTA_COMMIT_ACTION:
       case HoodieTimeline.COMMIT_ACTION:
-        HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
-            .fromBytes(metaClient.getActiveTimeline().getInstantDetails(hoodieInstant).get(), HoodieCommitMetadata.class);
-        return Option.of(commitMetadata);
+        return Option.of(
+            metaClient.getActiveTimeline().readCommitMetadata(hoodieInstant));
       default:
         throw new IllegalArgumentException("Unknown instant action" + hoodieInstant.getAction());
     }
@@ -1272,6 +1416,10 @@ public class HoodieTestTable {
                                                                              HoodieTableType tableType,
                                                                              String commitTime,
                                                                              Map<String, List<Pair<String, Integer>>> partitionToFilesNameLengthMap) {
+    if (partitionToFilesNameLengthMap.isEmpty()) {
+      return testTableState;
+    }
+
     for (Map.Entry<String, List<Pair<String, Integer>>> partitionEntry : partitionToFilesNameLengthMap.entrySet()) {
       String partitionName = partitionEntry.getKey();
       List<Pair<String, Integer>> fileNameAndLengthList = partitionEntry.getValue();
@@ -1291,6 +1439,10 @@ public class HoodieTestTable {
   public static List<HoodieWriteStat> generateHoodieWriteStatForPartition(Map<String, List<Pair<String, Integer>>> partitionToFileIdMap,
                                                                           String commitTime, boolean bootstrap) {
     List<HoodieWriteStat> writeStats = new ArrayList<>();
+    if (partitionToFileIdMap == null || partitionToFileIdMap.isEmpty()) {
+      return writeStats;
+    }
+
     for (Map.Entry<String, List<Pair<String, Integer>>> entry : partitionToFileIdMap.entrySet()) {
       String partition = entry.getKey();
       for (Pair<String, Integer> fileIdInfo : entry.getValue()) {
@@ -1332,6 +1484,11 @@ public class HoodieTestTable {
       }
     }
     return writeStats;
+  }
+
+  @Override
+  public void close() throws Exception {
+    // no-op
   }
 
   /**
@@ -1440,4 +1597,5 @@ public class HoodieTestTable {
       return this.commitsToPartitionToLogFileInfoStats.get(commitTime);
     }
   }
+
 }

@@ -59,7 +59,6 @@ import org.apache.hudi.metadata.FileSystemBackedTableMetadata;
 import org.apache.hudi.metadata.HoodieBackedTableMetadataWriter;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
-import org.apache.hudi.metadata.MetadataPartitionType;
 import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
 import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StorageConfiguration;
@@ -101,11 +100,11 @@ import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import scala.Tuple2;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.apache.hudi.common.testutils.HoodieTestUtils.getDefaultStorageConf;
 import static org.apache.hudi.common.util.CleanerUtils.convertCleanMetadata;
 import static org.apache.hudi.testutils.Assertions.assertNoWriteErrors;
@@ -133,10 +132,10 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
   protected SparkSession sparkSession;
   protected SQLContext sqlContext;
   protected ExecutorService executorService;
-  protected HoodieTableMetaClient metaClient;
   protected SparkRDDWriteClient writeClient;
   protected SparkRDDReadClient readClient;
   protected HoodieTableFileSystemView tableView;
+  protected Map<String, String> extraConf = new HashMap<>();
 
   protected TimelineService timelineService;
   protected final SparkTaskContextSupplier supplier = new SparkTaskContextSupplier();
@@ -200,6 +199,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
 
     // Initialize a local spark env
     SparkConf sc = HoodieClientTestUtils.getSparkConfForTest(appName + "#" + testMethodName);
+    extraConf.forEach(sc::set);
     SparkContext sparkContext = new SparkContext(sc);
     HoodieClientTestUtils.overrideSparkHadoopConfiguration(sparkContext);
     jsc = new JavaSparkContext(sparkContext);
@@ -227,6 +227,10 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
    */
   protected void initSparkContexts() {
     initSparkContexts(this.getClass().getSimpleName());
+  }
+
+  protected void initQueryIndexConf() {
+    extraConf.put("hoodie.fileIndex.dataSkippingFailureMode", "strict");
   }
 
   /**
@@ -547,7 +551,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
       runFullValidation(table.getConfig().getMetadataConfig(), writeConfig, metadataTableBasePath, engineContext);
     }
 
-    LOG.info("Validation time=" + timer.endTimer());
+    LOG.info("Validation time={}", timer.endTimer());
   }
 
   public void syncTableMetadata(HoodieWriteConfig writeConfig) {
@@ -649,22 +653,12 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     List<String> metadataTablePartitions = FSUtils.getAllPartitionPaths(
         engineContext, storage, HoodieTableMetadata.getMetadataTableBasePath(basePath), false);
 
-    List<MetadataPartitionType> enabledPartitionTypes = metadataWriter.getEnabledPartitionTypes();
-
-    assertEquals(enabledPartitionTypes.size(), metadataTablePartitions.size());
-
-    Map<String, MetadataPartitionType> partitionTypeMap = enabledPartitionTypes.stream()
-        .collect(Collectors.toMap(MetadataPartitionType::getPartitionPath, Function.identity()));
-
     // Metadata table should automatically compact and clean
     // versions are +1 as autoClean / compaction happens end of commits
     int numFileVersions = metadataWriteConfig.getCleanerFileVersionsRetained() + 1;
-    HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(metadataMetaClient, metadataMetaClient.getActiveTimeline());
+    HoodieTableFileSystemView fsView = HoodieTableFileSystemView.fileListingBasedFileSystemView(engineContext, metadataMetaClient, metadataMetaClient.getActiveTimeline());
     metadataTablePartitions.forEach(partition -> {
-      MetadataPartitionType partitionType = partitionTypeMap.get(partition);
-
       List<FileSlice> latestSlices = fsView.getLatestFileSlices(partition).collect(Collectors.toList());
-
       assertTrue(latestSlices.stream().map(FileSlice::getBaseFile).filter(Objects::nonNull).count() > 0, "Should have a single latest base file");
       assertTrue(latestSlices.size() > 0, "Should have a single latest file slice");
       assertTrue(latestSlices.size() <= numFileVersions, "Should limit file slice to "
@@ -697,7 +691,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
       HoodieCleanMetadata cleanMetadata = convertCleanMetadata(instantTime, Option.of(0L), Collections.singletonList(cleanStats), Collections.EMPTY_MAP);
       HoodieTestTable.of(metaClient).addClean(instantTime, cleanerPlan, cleanMetadata, isEmptyForAll, isEmptyCompleted);
     }
-    return new HoodieInstant(inflightOnly, "clean", instantTime);
+    return INSTANT_GENERATOR.createNewInstant(inflightOnly ? HoodieInstant.State.INFLIGHT : HoodieInstant.State.COMPLETED, "clean", instantTime);
   }
 
   protected HoodieTableMetaClient createMetaClient(SparkSession spark, String basePath) {

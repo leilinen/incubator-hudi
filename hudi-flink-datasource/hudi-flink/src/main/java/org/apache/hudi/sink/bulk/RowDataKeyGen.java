@@ -30,6 +30,7 @@ import org.apache.hudi.util.StreamerUtil;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -56,7 +57,6 @@ public class RowDataKeyGen implements Serializable {
   private static final String EMPTY_RECORDKEY_PLACEHOLDER = "__empty__";
 
   private static final String DEFAULT_PARTITION_PATH_SEPARATOR = "/";
-  private static final String HIVE_PARTITION_TEMPLATE = "%s=%s";
   private static final String DEFAULT_FIELD_SEPARATOR = ",";
 
   private final String[] recordKeyFields;
@@ -215,12 +215,12 @@ public class RowDataKeyGen implements Serializable {
       String partField = partFields[i];
       String partValue = StringUtils.objToString(partValues[i]);
       if (partValue == null || partValue.isEmpty()) {
-        partitionPath.append(hiveStylePartitioning ? String.format(HIVE_PARTITION_TEMPLATE, partField, DEFAULT_PARTITION_PATH) : DEFAULT_PARTITION_PATH);
+        partitionPath.append(hiveStylePartitioning ? partField + "=" + DEFAULT_PARTITION_PATH : DEFAULT_PARTITION_PATH);
       } else {
         if (encodePartitionPath) {
           partValue = escapePathName(partValue);
         }
-        partitionPath.append(hiveStylePartitioning ? String.format(HIVE_PARTITION_TEMPLATE, partField, partValue) : partValue);
+        partitionPath.append(hiveStylePartitioning ? partField + "=" + partValue : partValue);
       }
       if (i != partFields.length - 1) {
         partitionPath.append(DEFAULT_PARTITION_PATH_SEPARATOR);
@@ -259,7 +259,7 @@ public class RowDataKeyGen implements Serializable {
       partitionPath = escapePathName(partitionPath);
     }
     if (hiveStylePartitioning) {
-      partitionPath = String.format(HIVE_PARTITION_TEMPLATE, partField, partitionPath);
+      partitionPath = partField + "=" + partitionPath;
     }
     return partitionPath;
   }
@@ -271,6 +271,10 @@ public class RowDataKeyGen implements Serializable {
     if (val == null) {
       // should match the default partition path when STRING partition path re-format is supported
       return keyGenerator.getDefaultPartitionVal();
+    }
+    if (val instanceof StringData) {
+      // case of `TimestampType.DATE_STRING`, need to convert to string for consequent processing in `hudi-client-common` module
+      return val.toString();
     }
     return val;
   }

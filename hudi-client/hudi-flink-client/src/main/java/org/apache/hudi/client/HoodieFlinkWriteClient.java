@@ -20,7 +20,6 @@ package org.apache.hudi.client;
 
 import org.apache.hudi.client.common.HoodieFlinkEngineContext;
 import org.apache.hudi.client.utils.TransactionUtils;
-import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.data.HoodieListData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
@@ -42,10 +41,12 @@ import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.io.FlinkWriteHandleFactory;
 import org.apache.hudi.io.HoodieWriteHandle;
 import org.apache.hudi.io.MiniBatchHandle;
+import org.apache.hudi.io.v2.FlinkRowDataHandleFactory;
 import org.apache.hudi.table.BulkInsertPartitioner;
 import org.apache.hudi.table.HoodieFlinkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
+import org.apache.hudi.table.action.commit.BucketInfo;
 import org.apache.hudi.table.upgrade.FlinkUpgradeDowngradeHelper;
 import org.apache.hudi.table.upgrade.UpgradeDowngrade;
 import org.apache.hudi.util.WriteStatMerger;
@@ -73,8 +74,9 @@ import java.util.stream.Collectors;
  * @param <T> type of the payload
  */
 @SuppressWarnings("checkstyle:LineLength")
-public class HoodieFlinkWriteClient<T> extends
-    BaseHoodieWriteClient<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> {
+public class HoodieFlinkWriteClient<T>
+    extends BaseHoodieWriteClient<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>>
+    implements FlinkRowDataWriteClient<T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(HoodieFlinkWriteClient.class);
 
@@ -109,17 +111,17 @@ public class HoodieFlinkWriteClient<T> extends
         .values().stream()
         .map(duplicates -> duplicates.stream().reduce(WriteStatMerger::merge).get())
         .collect(Collectors.toList());
-    return commitStats(instantTime, HoodieListData.eager(writeStatuses), merged, extraMetadata, commitActionType, partitionToReplacedFileIds, extraPreCommitFunc);
+    return commitStats(instantTime, merged, extraMetadata, commitActionType, partitionToReplacedFileIds, extraPreCommitFunc);
   }
 
   @Override
   protected HoodieTable createTable(HoodieWriteConfig config) {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context);
+    return createTableAndValidate(config, HoodieFlinkTable::create);
   }
 
   @Override
   protected HoodieTable createTable(HoodieWriteConfig config, HoodieTableMetaClient metaClient) {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context, metaClient);
+    return createTableAndValidate(config, metaClient, HoodieFlinkTable::create);
   }
 
   @Override
@@ -146,6 +148,23 @@ public class HoodieFlinkWriteClient<T> extends
     HoodieWriteMetadata<List<WriteStatus>> result;
     try (AutoCloseableWriteHandle closeableHandle = new AutoCloseableWriteHandle(records, instantTime, table)) {
       result = ((HoodieFlinkTable<T>) table).upsert(context, closeableHandle.getWriteHandle(), instantTime, records);
+    }
+    if (result.getIndexLookupDuration().isPresent()) {
+      metrics.updateIndexMetrics(LOOKUP_STR, result.getIndexLookupDuration().get().toMillis());
+    }
+    return postWrite(result, instantTime, table);
+  }
+
+  @Override
+  public List<WriteStatus> upsert(Iterator<HoodieRecord<T>> records, BucketInfo bucketInfo, String instantTime) {
+    HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table =
+        initTable(WriteOperationType.UPSERT, Option.ofNullable(instantTime));
+    table.validateUpsertSchema();
+
+    preWrite(instantTime, WriteOperationType.UPSERT, table.getMetaClient());
+    HoodieWriteMetadata<List<WriteStatus>> result;
+    try (AutoCloseableWriteHandle closeableHandle = new AutoCloseableWriteHandle(bucketInfo, instantTime, table, records, false)) {
+      result = ((HoodieFlinkTable<T>) table).upsert(context, closeableHandle.getWriteHandle(), bucketInfo, instantTime, records);
     }
     if (result.getIndexLookupDuration().isPresent()) {
       metrics.updateIndexMetrics(LOOKUP_STR, result.getIndexLookupDuration().get().toMillis());
@@ -188,6 +207,11 @@ public class HoodieFlinkWriteClient<T> extends
     return postWrite(result, instantTime, table);
   }
 
+  @Override
+  public List<WriteStatus> insert(Iterator<HoodieRecord<T>> records, BucketInfo bucketInfo, String instantTime) {
+    throw new UnsupportedOperationException("INSERT option is not supported for RowData writing mode yet.");
+  }
+
   /**
    * Removes all existing records from the partitions affected and inserts the given HoodieRecords, into the table.
    *
@@ -209,6 +233,11 @@ public class HoodieFlinkWriteClient<T> extends
     return postWrite(result, instantTime, table);
   }
 
+  @Override
+  public List<WriteStatus> insertOverwrite(Iterator<HoodieRecord<T>> records, BucketInfo bucketInfo, String instantTime) {
+    throw new UnsupportedOperationException("InsertOverwrite option is not supported for RowData writing mode yet.");
+  }
+
   /**
    * Removes all existing records of the Hoodie table and inserts the given HoodieRecords, into the table.
    *
@@ -227,6 +256,11 @@ public class HoodieFlinkWriteClient<T> extends
       result = ((HoodieFlinkTable<T>) table).insertOverwriteTable(context, closeableHandle.getWriteHandle(), instantTime, records);
     }
     return postWrite(result, instantTime, table);
+  }
+
+  @Override
+  public List<WriteStatus> insertOverwriteTable(Iterator<HoodieRecord<T>> records, BucketInfo bucketInfo, String instantTime) {
+    throw new UnsupportedOperationException("InsertOverwriteTable option is not supported for RowData writing mode yet.");
   }
 
   @Override
@@ -301,12 +335,10 @@ public class HoodieFlinkWriteClient<T> extends
 
   /**
    * Refresh the last transaction metadata,
-   * should be called before the Driver starts a new transaction.
+   * should be called before the Driver starts a new transaction with a reloaded metaclient.
    */
   public void preTxn(WriteOperationType operationType, HoodieTableMetaClient metaClient) {
     if (txnManager.isLockRequired() && config.needResolveWriteConflict(operationType)) {
-      // refresh the meta client which is reused
-      metaClient.reloadActiveTimeline();
       this.lastCompletedTxnAndMetadata = TransactionUtils.getLastCompletedTxnInstantAndMetadata(metaClient);
       this.pendingInflightAndRequestedInstants = TransactionUtils.getInflightAndRequestedInstants(metaClient);
     }
@@ -375,9 +407,8 @@ public class HoodieFlinkWriteClient<T> extends
   private void completeClustering(
       HoodieReplaceCommitMetadata metadata,
       HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
-      String clusteringCommitTime,
-      Option<HoodieData<WriteStatus>> writeStatuses) {
-    ((HoodieFlinkTableServiceClient<T>) tableServiceClient).completeClustering(metadata, table, clusteringCommitTime, writeStatuses);
+      String clusteringCommitTime) {
+    ((HoodieFlinkTableServiceClient<T>) tableServiceClient).completeClustering(metadata, table, clusteringCommitTime);
   }
 
   @Override
@@ -394,11 +425,10 @@ public class HoodieFlinkWriteClient<T> extends
       TableServiceType tableServiceType,
       HoodieCommitMetadata metadata,
       HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
-      String commitInstant,
-      Option<HoodieData<WriteStatus>> writeStatuses) {
+      String commitInstant) {
     switch (tableServiceType) {
       case CLUSTER:
-        completeClustering((HoodieReplaceCommitMetadata) metadata, table, commitInstant, writeStatuses);
+        completeClustering((HoodieReplaceCommitMetadata) metadata, table, commitInstant);
         break;
       case COMPACT:
         completeCompaction(metadata, table, commitInstant);
@@ -433,6 +463,11 @@ public class HoodieFlinkWriteClient<T> extends
     cleanHandles();
   }
 
+  @Override
+  protected void updateColumnsToIndexWithColStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex) {
+    //no op. HUDI-8801 to fix.
+  }
+
   /**
    * Get or create a new write handle in order to reuse the file handles.
    *
@@ -459,8 +494,33 @@ public class HoodieFlinkWriteClient<T> extends
     return writeHandleFactory.create(this.bucketToHandles, record, config, instantTime, table, recordItr);
   }
 
+  /**
+   * Get or create a new RowData write handle in order to reuse the file handles.
+   *
+   * @param bucketInfo BucketInfo for the flushing data bucket
+   * @param config      Write config
+   * @param instantTime The instant time
+   * @param table       The table
+   * @param recordItr   Record iterator
+   * @param overwrite   Whether this is an overwrite operation
+   * @return Existing write handle or create a new one
+   */
+  private HoodieWriteHandle<?, ?, ?, ?> getOrCreateRowDataHandle(
+      BucketInfo bucketInfo,
+      HoodieWriteConfig config,
+      String instantTime,
+      HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
+      Iterator<HoodieRecord<T>> recordItr,
+      boolean overwrite) {
+    FlinkRowDataHandleFactory.Factory<T,
+        List<HoodieRecord<T>>,
+        List<HoodieKey>,
+        List<WriteStatus>> rowDataHandleFactory = FlinkRowDataHandleFactory.getFactory(table.getMetaClient().getTableConfig(), config, overwrite);
+    return rowDataHandleFactory.create(this.bucketToHandles, bucketInfo, config, instantTime, table, recordItr);
+  }
+
   public HoodieFlinkTable<T> getHoodieTable() {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context);
+    return HoodieFlinkTable.create(config, context);
   }
 
   public Map<String, List<String>> getPartitionToReplacedFileIds(
@@ -513,6 +573,15 @@ public class HoodieFlinkWriteClient<T> extends
         HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
         boolean overwrite) {
       this.writeHandle = getOrCreateWriteHandle(records.get(0), getConfig(), instantTime, table, records.listIterator(), overwrite);
+    }
+
+    AutoCloseableWriteHandle(
+        BucketInfo bucketInfo,
+        String instantTime,
+        HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
+        Iterator<HoodieRecord<T>> recordIterator,
+        boolean overwrite) {
+      this.writeHandle = getOrCreateRowDataHandle(bucketInfo, getConfig(), instantTime, table, recordIterator, overwrite);
     }
 
     HoodieWriteHandle<?, ?, ?, ?> getWriteHandle() {

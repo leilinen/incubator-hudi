@@ -65,17 +65,17 @@ public abstract class BaseSparkDeltaCommitActionExecutor<T>
     if (profile == null) {
       throw new HoodieUpsertException("Need workload profile to construct the upsert partitioner.");
     }
-    mergeOnReadUpsertPartitioner = new SparkUpsertDeltaCommitPartitioner<>(profile, (HoodieSparkEngineContext) context, table, config);
+    mergeOnReadUpsertPartitioner = new SparkUpsertDeltaCommitPartitioner<>(profile, (HoodieSparkEngineContext) context, table, config, operationType);
     return mergeOnReadUpsertPartitioner;
   }
 
   @Override
   public Iterator<List<WriteStatus>> handleUpdate(String partitionPath, String fileId,
       Iterator<HoodieRecord<T>> recordItr) throws IOException {
-    LOG.info("Merging updates for commit " + instantTime + " for file " + fileId);
+    LOG.info("Merging updates for commit {} for file {}", instantTime, fileId);
     if (!table.getIndex().canIndexLogFiles() && mergeOnReadUpsertPartitioner != null
         && mergeOnReadUpsertPartitioner.getSmallFileIds().contains(fileId)) {
-      LOG.info("Small file corrections for updates for commit " + instantTime + " for file " + fileId);
+      LOG.info("Small file corrections for updates for commit {} for file {}", instantTime, fileId);
       return super.handleUpdate(partitionPath, fileId, recordItr);
     } else {
       HoodieAppendHandle<?, ?, ?, ?> appendHandle = new HoodieAppendHandle<>(config, instantTime, table,

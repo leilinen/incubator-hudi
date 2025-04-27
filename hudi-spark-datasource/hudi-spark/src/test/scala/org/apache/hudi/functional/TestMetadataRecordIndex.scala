@@ -32,6 +32,8 @@ import org.apache.hudi.testutils.HoodieSparkClientTestBase
 import org.apache.spark.sql._
 import org.junit.jupiter.api._
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue}
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
 
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -78,10 +80,11 @@ class TestMetadataRecordIndex extends HoodieSparkClientTestBase {
     cleanupSparkContexts()
   }
 
-  @Test
-  def testClusteringWithRecordIndex(): Unit = {
+  @ParameterizedTest
+  @EnumSource(classOf[HoodieTableType])
+  def testClusteringWithRecordIndex(tableType: HoodieTableType): Unit = {
     val hudiOpts = commonOpts ++ Map(
-      TABLE_TYPE.key -> HoodieTableType.COPY_ON_WRITE.name(),
+      TABLE_TYPE.key -> tableType.name(),
       HoodieClusteringConfig.INLINE_CLUSTERING.key() -> "true",
       HoodieClusteringConfig.INLINE_CLUSTERING_MAX_COMMITS.key() -> "2"
     )
@@ -103,7 +106,7 @@ class TestMetadataRecordIndex extends HoodieSparkClientTestBase {
       operation = UPSERT_OPERATION_OPT_VAL,
       saveMode = SaveMode.Append)
 
-    assertTrue(getLatestClusteringInstant().get().getTimestamp.compareTo(lastClusteringInstant.get().getTimestamp) > 0)
+    assertTrue(getLatestClusteringInstant().get().requestedTime.compareTo(lastClusteringInstant.get().requestedTime) > 0)
     validateDataAndRecordIndices(hudiOpts)
   }
 
@@ -183,10 +186,7 @@ class TestMetadataRecordIndex extends HoodieSparkClientTestBase {
       val recordKey: String = row.getAs("_hoodie_record_key")
       val partitionPath: String = row.getAs("_hoodie_partition_path")
       val fileName: String = row.getAs("_hoodie_file_name")
-      val recordLocations = recordIndexMap.get(recordKey)
-      assertFalse(recordLocations.isEmpty)
-      // assuming no duplicate keys for now
-      val recordLocation = recordLocations.get(0)
+      val recordLocation = recordIndexMap.get(recordKey)
       assertEquals(partitionPath, recordLocation.getPartitionPath)
       if (!writeConfig.inlineClusteringEnabled && !writeConfig.isAsyncClusteringEnabled) {
         // The file id changes after clustering, so only assert it for usual upsert and compaction operations

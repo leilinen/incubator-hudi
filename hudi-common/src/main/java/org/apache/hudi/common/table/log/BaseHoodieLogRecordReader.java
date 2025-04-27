@@ -19,20 +19,18 @@
 
 package org.apache.hudi.common.table.log;
 
-import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodiePayloadProps;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieRecordMerger;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.block.HoodieCommandBlock;
 import org.apache.hudi.common.table.log.block.HoodieDataBlock;
 import org.apache.hudi.common.table.log.block.HoodieDeleteBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock;
-import org.apache.hudi.common.table.read.HoodieFileGroupRecordBuffer;
+import org.apache.hudi.common.table.read.FileGroupRecordBuffer;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
@@ -68,6 +66,8 @@ import static org.apache.hudi.common.table.log.block.HoodieLogBlock.HeaderMetada
 import static org.apache.hudi.common.table.log.block.HoodieLogBlock.HeaderMetadataType.TARGET_INSTANT_TIME;
 import static org.apache.hudi.common.table.log.block.HoodieLogBlock.HoodieLogBlockType.COMMAND_BLOCK;
 import static org.apache.hudi.common.table.log.block.HoodieLogBlock.HoodieLogBlockType.CORRUPT_BLOCK;
+import static org.apache.hudi.common.table.timeline.InstantComparison.GREATER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 import static org.apache.hudi.common.util.ValidationUtils.checkState;
 
 /**
@@ -96,10 +96,6 @@ public abstract class BaseHoodieLogRecordReader<T> {
   private final Option<String> partitionNameOverrideOpt;
   // Pre-combining field
   protected final String preCombineField;
-  // Stateless component for merging records
-  protected final HoodieRecordMerger recordMerger;
-  // Record merge mode
-  protected final RecordMergeMode recordMergeMode;
   private final TypedProperties payloadProps;
   // Log File Paths
   protected final List<String> logFilePaths;
@@ -135,24 +131,19 @@ public abstract class BaseHoodieLogRecordReader<T> {
   // Populate meta fields for the records
   private final boolean populateMetaFields;
   // Record type read from log block
-  protected final HoodieRecord.HoodieRecordType recordType;
   // Collect all the block instants after scanning all the log files.
   private final List<String> validBlockInstants = new ArrayList<>();
   // Use scanV2 method.
   private final boolean enableOptimizedLogBlocksScan;
-  protected HoodieFileGroupRecordBuffer<T> recordBuffer;
+  protected FileGroupRecordBuffer<T> recordBuffer;
+  // Allows to consider inflight instants while merging log records
+  protected boolean allowInflightInstants;
 
-  protected BaseHoodieLogRecordReader(HoodieReaderContext readerContext,
-                                      HoodieStorage storage,
-                                      List<String> logFilePaths,
+  protected BaseHoodieLogRecordReader(HoodieReaderContext readerContext, HoodieStorage storage, List<String> logFilePaths,
                                       boolean reverseReader, int bufferSize, Option<InstantRange> instantRange,
-                                      boolean withOperationField, boolean forceFullScan,
-                                      Option<String> partitionNameOverride,
-                                      Option<String> keyFieldOverride,
-                                      boolean enableOptimizedLogBlocksScan,
-                                      HoodieRecordMerger recordMerger,
-                                      RecordMergeMode recordMergeMode,
-                                      HoodieFileGroupRecordBuffer<T> recordBuffer) {
+                                      boolean withOperationField, boolean forceFullScan, Option<String> partitionNameOverride,
+                                      Option<String> keyFieldOverride, boolean enableOptimizedLogBlocksScan, FileGroupRecordBuffer<T> recordBuffer,
+                                      boolean allowInflightInstants) {
     this.readerContext = readerContext;
     this.readerSchema = readerContext.getSchemaHandler().getRequiredSchema();
     this.latestInstantTime = readerContext.getLatestCommitTime();
@@ -169,8 +160,6 @@ public abstract class BaseHoodieLogRecordReader<T> {
       props.setProperty(HoodiePayloadProps.PAYLOAD_ORDERING_FIELD_PROP_KEY, this.preCombineField);
     }
     this.payloadProps = props;
-    this.recordMerger = recordMerger;
-    this.recordMergeMode = recordMergeMode;
     this.totalLogFiles.addAndGet(logFilePaths.size());
     this.logFilePaths = logFilePaths;
     this.reverseReader = reverseReader;
@@ -204,8 +193,9 @@ public abstract class BaseHoodieLogRecordReader<T> {
     }
 
     this.partitionNameOverrideOpt = partitionNameOverride;
-    this.recordType = recordMerger.getRecordType();
     this.recordBuffer = recordBuffer;
+    // When the allowInflightInstants flag is enabled, records written by inflight instants are also read
+    this.allowInflightInstants = allowInflightInstants;
   }
 
   /**
@@ -233,13 +223,13 @@ public abstract class BaseHoodieLogRecordReader<T> {
     totalCorruptBlocks = new AtomicLong(0);
     totalLogBlocks = new AtomicLong(0);
     totalLogRecords = new AtomicLong(0);
-    HoodieLogFormatReverseReader logFormatReaderWrapper = null;
+    HoodieLogFormatReader logFormatReaderWrapper = null;
     HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
     HoodieTimeline completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
     HoodieTimeline inflightInstantsTimeline = commitsTimeline.filterInflights();
     try {
       // Iterate over the paths
-      logFormatReaderWrapper = new HoodieLogFormatReverseReader(storage,
+      logFormatReaderWrapper = new HoodieLogFormatReader(storage,
           logFilePaths.stream().map(logFile -> new HoodieLogFile(new StoragePath(logFile))).collect(Collectors.toList()),
           readerSchema, reverseReader, bufferSize, shouldLookupRecords(), recordKeyField, internalSchema);
 
@@ -261,15 +251,13 @@ public abstract class BaseHoodieLogRecordReader<T> {
           blockSeqNo = Integer.parseInt(parts[1]);
         }
         totalLogBlocks.incrementAndGet();
-        if (logBlock.getBlockType() != CORRUPT_BLOCK
-            && !HoodieTimeline.compareTimestamps(logBlock.getLogBlockHeader().get(INSTANT_TIME), HoodieTimeline.LESSER_THAN_OR_EQUALS, this.latestInstantTime
-        )) {
-          // hit a block with instant time greater than should be processed, stop processing further
-          continue;
-        }
-        if (logBlock.getBlockType() != CORRUPT_BLOCK && logBlock.getBlockType() != COMMAND_BLOCK) {
-          if (!completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime)
-              || inflightInstantsTimeline.containsInstant(instantTime)) {
+        if (logBlock.isDataOrDeleteBlock()) {
+          if (compareTimestamps(logBlock.getLogBlockHeader().get(INSTANT_TIME), GREATER_THAN, this.latestInstantTime)) {
+            // Skip processing a data or delete block with the instant time greater than the latest instant time used by this log record reader
+            continue;
+          }
+          if (!allowInflightInstants
+              && (inflightInstantsTimeline.containsInstant(instantTime) || !completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime))) {
             // hit an uncommitted block possibly from a failed write, move to the next one and skip processing this one
             continue;
           }
@@ -353,9 +341,9 @@ public abstract class BaseHoodieLogRecordReader<T> {
                   }
                   if (targetInstantForCommandBlock.contentEquals(block.getLogBlockHeader().get(INSTANT_TIME))) {
                     // rollback older data block or delete block
-                    LOG.info(String.format(
-                        "Rolling back an older log block read from %s with instantTime %s",
-                        logFile.getPath(), targetInstantForCommandBlock));
+                    LOG.info(
+                        "Rolling back an older log block read from {} with instantTime {}",
+                        logFile.getPath(), targetInstantForCommandBlock);
                     return false;
                   }
                   return true;
@@ -404,6 +392,7 @@ public abstract class BaseHoodieLogRecordReader<T> {
 
       // Done
       progress = 1.0f;
+      totalLogRecords.set(recordBuffer.getTotalLogRecords());
     } catch (IOException e) {
       LOG.error("Got IOException when reading log file", e);
       throw new HoodieIOException("IOException when reading log file ", e);
@@ -594,14 +583,14 @@ public abstract class BaseHoodieLogRecordReader<T> {
           totalCorruptBlocks.incrementAndGet();
           continue;
         }
-        if (!HoodieTimeline.compareTimestamps(logBlock.getLogBlockHeader().get(INSTANT_TIME),
-            HoodieTimeline.LESSER_THAN_OR_EQUALS, this.latestInstantTime)) {
-          // hit a block with instant time greater than should be processed, stop processing further
-          break;
+        if (logBlock.isDataOrDeleteBlock()
+            && compareTimestamps(logBlock.getLogBlockHeader().get(INSTANT_TIME), GREATER_THAN, this.latestInstantTime)) {
+          // Skip processing a data or delete block with the instant time greater than the latest instant time used by this log record reader
+          continue;
         }
         if (logBlock.getBlockType() != COMMAND_BLOCK) {
-          if (!completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime)
-              || inflightInstantsTimeline.containsInstant(instantTime)) {
+          if (!allowInflightInstants
+              && (inflightInstantsTimeline.containsInstant(instantTime)) || !completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime)) {
             // hit an uncommitted block possibly from a failed write, move to the next one and skip processing this one
             continue;
           }
@@ -735,15 +724,6 @@ public abstract class BaseHoodieLogRecordReader<T> {
   }
 
   /**
-   * Checks if the current logblock belongs to a later instant.
-   */
-  private boolean isNewInstantBlock(HoodieLogBlock logBlock) {
-    return currentInstantLogBlocks.size() > 0 && currentInstantLogBlocks.peek().getBlockType() != CORRUPT_BLOCK
-        && !logBlock.getLogBlockHeader().get(INSTANT_TIME)
-        .contentEquals(currentInstantLogBlocks.peek().getLogBlockHeader().get(INSTANT_TIME));
-  }
-
-  /**
    * Process the set of log blocks belonging to the last instant which is read fully.
    */
   private void processQueuedBlocksForInstant(Deque<HoodieLogBlock> logBlocks, int numLogFilesSeen,
@@ -769,7 +749,7 @@ public abstract class BaseHoodieLogRecordReader<T> {
       }
     }
     // At this step the lastBlocks are consumed. We track approximate progress by number of log-files seen
-    progress = (numLogFilesSeen - 1) / logFilePaths.size();
+    progress = (float) (numLogFilesSeen - 1) / logFilePaths.size();
   }
 
   private boolean shouldLookupRecords() {
@@ -866,12 +846,6 @@ public abstract class BaseHoodieLogRecordReader<T> {
     public Builder withOperationField(boolean withOperationField) {
       throw new UnsupportedOperationException();
     }
-
-    public Builder withRecordMerger(HoodieRecordMerger recordMerger) {
-      throw new UnsupportedOperationException();
-    }
-
-    public abstract Builder withRecordMergeMode(RecordMergeMode recordMergeMode);
 
     public Builder withOptimizedLogBlocksScan(boolean enableOptimizedLogBlocksScan) {
       throw new UnsupportedOperationException();

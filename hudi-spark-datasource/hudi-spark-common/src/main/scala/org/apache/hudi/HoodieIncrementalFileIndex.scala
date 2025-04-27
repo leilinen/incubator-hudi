@@ -31,6 +31,7 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 
 import java.util.stream.Collectors
+
 import scala.collection.JavaConverters._
 
 class HoodieIncrementalFileIndex(override val spark: SparkSession,
@@ -43,7 +44,7 @@ class HoodieIncrementalFileIndex(override val spark: SparkSession,
   extends HoodieFileIndex(
     spark, metaClient, schemaSpec, options, fileStatusCache, includeLogFiles, shouldEmbedFileSlices
   ) with FileIndex {
-  val mergeOnReadIncrementalRelation: MergeOnReadIncrementalRelation = MergeOnReadIncrementalRelation(
+  val mergeOnReadIncrementalRelation: MergeOnReadIncrementalRelationV2 = MergeOnReadIncrementalRelationV2(
     spark.sqlContext, options, metaClient, schemaSpec, schemaSpec)
 
   override def listFiles(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Seq[PartitionDirectory] = {

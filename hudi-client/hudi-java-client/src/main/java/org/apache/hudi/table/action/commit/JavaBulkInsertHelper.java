@@ -19,7 +19,6 @@
 package org.apache.hudi.table.action.commit;
 
 import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -73,7 +72,7 @@ public class JavaBulkInsertHelper<T, R> extends BaseBulkInsertHelper<T, List<Hoo
     // It's possible the transition to inflight could have already happened.
     if (!table.getActiveTimeline().filterInflights().containsInstant(instantTime)) {
       table.getActiveTimeline().transitionRequestedToInflight(
-          new HoodieInstant(HoodieInstant.State.REQUESTED, table.getMetaClient().getCommitActionType(), instantTime),
+          table.getInstantGenerator().createNewInstant(HoodieInstant.State.REQUESTED, table.getMetaClient().getCommitActionType(), instantTime),
           Option.empty(),
           config.shouldAllowMultiWriteOnSameInstant());
     }
@@ -118,7 +117,7 @@ public class JavaBulkInsertHelper<T, R> extends BaseBulkInsertHelper<T, List<Hoo
     } else {
       FileIdPrefixProvider fileIdPrefixProvider = (FileIdPrefixProvider) ReflectionUtils.loadClass(
           config.getFileIdPrefixProviderClassName(),
-          new TypedProperties(config.getProps()));
+          config.getProps());
       fileIdPrefix = fileIdPrefixProvider.createFilePrefix("");
     }
 

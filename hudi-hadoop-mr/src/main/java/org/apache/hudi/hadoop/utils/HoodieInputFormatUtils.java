@@ -27,7 +27,6 @@ import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieDefaultTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineUtils.HollowCommitHandling;
@@ -38,6 +37,7 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.TablePathUtils;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.TableNotFoundException;
+import org.apache.hudi.hadoop.BootstrapBaseFileSplit;
 import org.apache.hudi.hadoop.FileStatusWithBootstrapBaseFile;
 import org.apache.hudi.hadoop.HoodieHFileInputFormat;
 import org.apache.hudi.hadoop.HoodieParquetInputFormat;
@@ -47,7 +47,6 @@ import org.apache.hudi.hadoop.realtime.HoodieHFileRealtimeInputFormat;
 import org.apache.hudi.hadoop.realtime.HoodieParquetRealtimeInputFormat;
 import org.apache.hudi.hadoop.realtime.HoodieRealtimeFileSplit;
 import org.apache.hudi.hadoop.realtime.HoodieRealtimePath;
-import org.apache.hudi.hadoop.realtime.HoodieRealtimeRecordReader;
 import org.apache.hudi.hadoop.realtime.RealtimeSplit;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.HoodieStorageUtils;
@@ -218,17 +217,17 @@ public class HoodieInputFormatUtils {
    * @param timeline
    * @return
    */
-  public static HoodieDefaultTimeline filterInstantsTimeline(HoodieDefaultTimeline timeline) {
-    HoodieDefaultTimeline commitsAndCompactionTimeline = timeline.getWriteTimeline();
+  public static HoodieTimeline filterInstantsTimeline(HoodieTimeline timeline) {
+    HoodieTimeline commitsAndCompactionTimeline = timeline.getWriteTimeline();
     Option<HoodieInstant> pendingCompactionInstant = commitsAndCompactionTimeline
         .filterPendingCompactionTimeline().firstInstant();
     if (pendingCompactionInstant.isPresent()) {
-      HoodieDefaultTimeline instantsTimeline = commitsAndCompactionTimeline
-          .findInstantsBefore(pendingCompactionInstant.get().getTimestamp());
+      HoodieTimeline instantsTimeline = commitsAndCompactionTimeline
+          .findInstantsBefore(pendingCompactionInstant.get().requestedTime());
       int numCommitsFilteredByCompaction = commitsAndCompactionTimeline.getCommitsTimeline().countInstants()
           - instantsTimeline.getCommitsTimeline().countInstants();
-      LOG.info("Earliest pending compaction instant is: " + pendingCompactionInstant.get().getTimestamp()
-          + " skipping " + numCommitsFilteredByCompaction + " commits");
+      LOG.info("Earliest pending compaction instant is: {} skipping {} commits",
+          pendingCompactionInstant.get().requestedTime(), numCommitsFilteredByCompaction);
 
       return instantsTimeline;
     } else {
@@ -252,8 +251,7 @@ public class HoodieInputFormatUtils {
                                                      List<Path> inputPaths) throws IOException {
     Set<String> partitionsToList = new HashSet<>();
     for (HoodieInstant commit : commitsToCheck) {
-      HoodieCommitMetadata commitMetadata = HoodieCommitMetadata.fromBytes(timeline.getInstantDetails(commit).get(),
-          HoodieCommitMetadata.class);
+      HoodieCommitMetadata commitMetadata = timeline.readCommitMetadata(commit);
       partitionsToList.addAll(commitMetadata.getPartitionToWriteStats().keySet());
     }
     if (partitionsToList.isEmpty()) {
@@ -300,7 +298,7 @@ public class HoodieInputFormatUtils {
    */
   public static Option<HoodieTimeline> getFilteredCommitsTimeline(JobContext job, HoodieTableMetaClient tableMetaClient) {
     String tableName = tableMetaClient.getTableConfig().getTableName();
-    HoodieDefaultTimeline baseTimeline;
+    HoodieTimeline baseTimeline;
     if (HoodieHiveUtils.stopAtCompaction(job, tableName)) {
       baseTimeline = filterInstantsTimeline(tableMetaClient.getActiveTimeline());
     } else {
@@ -340,7 +338,7 @@ public class HoodieInputFormatUtils {
     String lastIncrementalTs = HoodieHiveUtils.readStartCommitTime(job, tableName);
     // Total number of commits to return in this batch. Set this to -1 to get all the commits.
     Integer maxCommits = HoodieHiveUtils.readMaxCommits(job, tableName);
-    LOG.info("Last Incremental timestamp was set as " + lastIncrementalTs);
+    LOG.info("Last Incremental timestamp was set as {}", lastIncrementalTs);
     return timeline.findInstantsAfter(lastIncrementalTs, maxCommits);
   }
 
@@ -388,7 +386,7 @@ public class HoodieInputFormatUtils {
         }
       }
     }
-    LOG.info("Reading hoodie metadata from path " + baseDir.toString());
+    LOG.info("Reading hoodie metadata from path {}", baseDir);
     return HoodieTableMetaClient.builder()
         .setConf(storage.getConf().newInstance()).setBasePath(baseDir.toString()).build();
   }
@@ -425,54 +423,16 @@ public class HoodieInputFormatUtils {
         Arrays.stream(fileStatuses)
             .map(HadoopFSUtils::convertToStoragePathInfo)
             .collect(Collectors.toList()));
-    List<String> commitsList = commitsToCheck.stream().map(HoodieInstant::getTimestamp).collect(Collectors.toList());
+    List<String> commitsList = commitsToCheck.stream().map(HoodieInstant::requestedTime).collect(Collectors.toList());
     List<HoodieBaseFile> filteredFiles = roView.getLatestBaseFilesInRange(commitsList).collect(Collectors.toList());
     List<FileStatus> returns = new ArrayList<>();
     for (HoodieBaseFile filteredFile : filteredFiles) {
-      LOG.debug("Processing incremental hoodie file - " + filteredFile.getPath());
+      LOG.debug("Processing incremental hoodie file - {}", filteredFile.getPath());
       filteredFile = refreshFileStatus(job.getConfiguration(), filteredFile);
       returns.add(getFileStatus(filteredFile));
     }
-    LOG.info("Total paths to process after hoodie incremental filter " + filteredFiles.size());
+    LOG.info("Total paths to process after hoodie incremental filter {}", filteredFiles.size());
     return returns;
-  }
-
-  /**
-   * Takes in a list of filesStatus and a list of table metadata. Groups the files status list
-   * based on given table metadata.
-   *
-   * @param fileStatuses
-   * @param fileExtension
-   * @param metaClientList
-   * @return
-   * @throws IOException
-   */
-  public static Map<HoodieTableMetaClient, List<FileStatus>> groupFileStatusForSnapshotPaths(
-      FileStatus[] fileStatuses, String fileExtension, Collection<HoodieTableMetaClient> metaClientList) {
-    // This assumes the paths for different tables are grouped together
-    Map<HoodieTableMetaClient, List<FileStatus>> grouped = new HashMap<>();
-    HoodieTableMetaClient metadata = null;
-    for (FileStatus status : fileStatuses) {
-      Path inputPath = status.getPath();
-      if (!inputPath.getName().endsWith(fileExtension)) {
-        //FIXME(vc): skip non data files for now. This wont be needed once log file name start
-        // with "."
-        continue;
-      }
-      if ((metadata == null) || (!inputPath.toString().contains(metadata.getBasePath().toString()))) {
-        for (HoodieTableMetaClient metaClient : metaClientList) {
-          if (inputPath.toString().contains(metaClient.getBasePath().toString())) {
-            metadata = metaClient;
-            if (!grouped.containsKey(metadata)) {
-              grouped.put(metadata, new ArrayList<>());
-            }
-            break;
-          }
-        }
-      }
-      grouped.get(metadata).add(status);
-    }
-    return grouped;
   }
 
   public static Map<HoodieTableMetaClient, List<Path>> groupSnapshotPathsByMetaClient(
@@ -482,9 +442,14 @@ public class HoodieInputFormatUtils {
     Map<HoodieTableMetaClient, List<Path>> grouped = new HashMap<>();
     metaClientList.forEach(metaClient -> grouped.put(metaClient, new ArrayList<>()));
     for (Path path : snapshotPaths) {
+      String inputPathStr = path.toString();
       // Find meta client associated with the input path
-      metaClientList.stream().filter(metaClient -> path.toString().contains(metaClient.getBasePath().toString()))
-          .forEach(metaClient -> grouped.get(metaClient).add(path));
+      Option<HoodieTableMetaClient> matchedMetaClient = Option.fromJavaOptional(metaClientList.stream()
+          .filter(metaClient -> {
+            String basePathStr = metaClient.getBasePath().toString();
+            return inputPathStr.equals(basePathStr) || inputPathStr.startsWith(basePathStr + "/"); })
+          .findFirst());
+      matchedMetaClient.ifPresent(metaClient -> grouped.get(metaClient).add(path));
     }
     return grouped;
   }
@@ -509,7 +474,7 @@ public class HoodieInputFormatUtils {
     try {
       if (dataFile.getFileSize() == 0) {
         HoodieStorage storage = HoodieStorageUtils.getStorage(dataPath, HadoopFSUtils.getStorageConf(conf));
-        LOG.info("Refreshing file status " + dataFile.getPath());
+        LOG.info("Refreshing file status {}", dataFile.getPath());
         return new HoodieBaseFile(storage.getPathInfo(dataPath),
             dataFile.getBootstrapBaseFile().orElse(null));
       }
@@ -571,9 +536,9 @@ public class HoodieInputFormatUtils {
   /**
    * `schema.on.read` and skip merge not implemented
    */
-  public static boolean shouldUseFilegroupReader(final JobConf jobConf) {
+  public static boolean shouldUseFilegroupReader(final JobConf jobConf, final InputSplit split) {
     return jobConf.getBoolean(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), HoodieReaderConfig.FILE_GROUP_READER_ENABLED.defaultValue())
         && !jobConf.getBoolean(HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.key(), HoodieCommonConfig.SCHEMA_EVOLUTION_ENABLE.defaultValue())
-        && !jobConf.getBoolean(HoodieRealtimeRecordReader.REALTIME_SKIP_MERGE_PROP, false);
+        && !(split instanceof BootstrapBaseFileSplit);
   }
 }

@@ -22,10 +22,10 @@ package org.apache.hudi.table.action.index;
 import org.apache.hudi.avro.model.HoodieIndexPartitionInfo;
 import org.apache.hudi.avro.model.HoodieIndexPlan;
 import org.apache.hudi.client.transaction.TransactionManager;
+import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -38,7 +38,6 @@ import org.apache.hudi.table.action.BaseActionExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
@@ -48,8 +47,11 @@ import java.util.stream.Collectors;
 import static org.apache.hudi.common.model.WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL;
 import static org.apache.hudi.common.model.WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL;
 import static org.apache.hudi.config.HoodieWriteConfig.WRITE_CONCURRENCY_MODE;
+import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_EXPRESSION_INDEX_PREFIX;
+import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_SECONDARY_INDEX_PREFIX;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.deleteMetadataPartition;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.getInflightAndCompletedMetadataPartitions;
+import static org.apache.hudi.metadata.HoodieTableMetadataUtil.getSecondaryOrExpressionIndexName;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.metadataPartitionExists;
 
 /**
@@ -89,21 +91,21 @@ public class ScheduleIndexActionExecutor<T, I, K, O> extends BaseActionExecutor<
     validateBeforeScheduling();
     // make sure that it is idempotent, check with previously pending index operations.
     Set<String> indexesInflightOrCompleted = getInflightAndCompletedMetadataPartitions(table.getMetaClient().getTableConfig());
+    InstantGenerator instantGenerator = table.getMetaClient().getInstantGenerator();
 
     Set<String> requestedPartitions = partitionIndexTypes.stream().map(MetadataPartitionType::getPartitionPath).collect(Collectors.toSet());
     requestedPartitions.addAll(partitionPaths);
     requestedPartitions.removeAll(indexesInflightOrCompleted);
 
     if (!requestedPartitions.isEmpty()) {
-      LOG.warn(String.format("Following partitions already exist or inflight: %s. Going to schedule indexing of only these partitions: %s",
-          indexesInflightOrCompleted, requestedPartitions));
+      LOG.warn("Following partitions already exist or inflight: {}. Going to schedule indexing of only these partitions: {}", indexesInflightOrCompleted, requestedPartitions);
     } else {
-      LOG.error("All requested index types are inflight or completed: " + partitionIndexTypes);
+      LOG.error("All requested index types are inflight or completed: {}", partitionIndexTypes);
       return Option.empty();
     }
     List<MetadataPartitionType> finalPartitionsToIndex = partitionIndexTypes.stream()
         .filter(p -> requestedPartitions.contains(p.getPartitionPath())).collect(Collectors.toList());
-    final HoodieInstant indexInstant = HoodieTimeline.getIndexRequestedInstant(instantTime);
+    final HoodieInstant indexInstant = instantGenerator.getIndexRequestedInstant(instantTime);
     try {
       this.txnManager.beginTransaction(Option.of(indexInstant), Option.empty());
       // get last completed instant
@@ -115,14 +117,13 @@ public class ScheduleIndexActionExecutor<T, I, K, O> extends BaseActionExecutor<
             .collect(Collectors.toList());
         HoodieIndexPlan indexPlan = new HoodieIndexPlan(LATEST_INDEX_PLAN_VERSION, indexPartitionInfos);
         // update data timeline with requested instant
-        table.getActiveTimeline().saveToPendingIndexAction(indexInstant, TimelineMetadataUtils.serializeIndexPlan(indexPlan));
+        table.getActiveTimeline().saveToPendingIndexAction(indexInstant, indexPlan);
         return Option.of(indexPlan);
       }
-    } catch (IOException e) {
+    } catch (HoodieIOException e) {
       LOG.error("Could not initialize file groups", e);
       // abort gracefully
       abort(indexInstant);
-      throw new HoodieIOException(e.getMessage(), e);
     } finally {
       this.txnManager.endTransaction(Option.of(indexInstant));
     }
@@ -131,9 +132,16 @@ public class ScheduleIndexActionExecutor<T, I, K, O> extends BaseActionExecutor<
   }
 
   private HoodieIndexPartitionInfo buildIndexPartitionInfo(MetadataPartitionType partitionType, HoodieInstant indexUptoInstant) {
-    // for functional index, we need to pass the index name as the partition name
-    String partitionName = MetadataPartitionType.FUNCTIONAL_INDEX.equals(partitionType) ? config.getIndexingConfig().getIndexName() : partitionType.getPartitionPath();
-    return new HoodieIndexPartitionInfo(LATEST_INDEX_PLAN_VERSION, partitionName, indexUptoInstant.getTimestamp(), Collections.emptyMap());
+    String partitionName = partitionType.getPartitionPath();
+    HoodieMetadataConfig metadataConfig = config.getMetadataConfig();
+    // for expression or secondary index, we need to pass the metadata config to derive the partition name
+    if (MetadataPartitionType.EXPRESSION_INDEX.equals(partitionType)) {
+      partitionName = getSecondaryOrExpressionIndexName(metadataConfig::getExpressionIndexName, PARTITION_NAME_EXPRESSION_INDEX_PREFIX, metadataConfig.getExpressionIndexColumn());
+    }
+    if (MetadataPartitionType.SECONDARY_INDEX.equals(partitionType)) {
+      partitionName = getSecondaryOrExpressionIndexName(metadataConfig::getSecondaryIndexName, PARTITION_NAME_SECONDARY_INDEX_PREFIX, metadataConfig.getSecondaryIndexColumn());
+    }
+    return new HoodieIndexPartitionInfo(LATEST_INDEX_PLAN_VERSION, partitionName, indexUptoInstant.requestedTime(), Collections.emptyMap());
   }
 
   private void validateBeforeScheduling() {

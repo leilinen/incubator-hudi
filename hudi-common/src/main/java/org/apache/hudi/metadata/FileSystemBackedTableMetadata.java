@@ -33,7 +33,6 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieMetadataException;
-import org.apache.hudi.exception.TableNotFoundException;
 import org.apache.hudi.expression.BindVisitor;
 import org.apache.hudi.expression.Expression;
 import org.apache.hudi.expression.PartialBindVisitor;
@@ -49,6 +48,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -80,8 +80,7 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
 
     StoragePath metaPath =
         new StoragePath(dataBasePath, HoodieTableMetaClient.METAFOLDER_NAME);
-    TableNotFoundException.checkTableValidity(storage, this.dataBasePath, metaPath);
-    HoodieTableConfig tableConfig = new HoodieTableConfig(storage, metaPath, null, null);
+    HoodieTableConfig tableConfig = new HoodieTableConfig(storage, metaPath, null, null, null);
     this.hiveStylePartitioningEnabled =
         Boolean.parseBoolean(tableConfig.getHiveStylePartitioningEnable());
     this.urlEncodePartitioningEnabled =
@@ -287,13 +286,13 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
     // no-op
   }
 
-  public Option<BloomFilter> getBloomFilter(final String partitionName, final String fileName)
+  public Option<BloomFilter> getBloomFilter(final String partitionName, final String fileName, final String metadataPartitionName)
       throws HoodieMetadataException {
     throw new HoodieMetadataException("Unsupported operation: getBloomFilter for " + fileName);
   }
 
   @Override
-  public Map<Pair<String, String>, BloomFilter> getBloomFilters(final List<Pair<String, String>> partitionNameFileNameList)
+  public Map<Pair<String, String>, BloomFilter> getBloomFilters(final List<Pair<String, String>> partitionNameFileNameList, final String metadataPartitionName)
       throws HoodieMetadataException {
     throw new HoodieMetadataException("Unsupported operation: getBloomFilters!");
   }
@@ -310,22 +309,37 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
   }
 
   @Override
-  public Map<String, List<HoodieRecord<HoodieMetadataPayload>>> getAllRecordsByKeys(List<String> keys, String partitionName) {
-    throw new HoodieMetadataException("Unsupported operation: getAllRecordsByKeys!");
-  }
-
-  @Override
-  public Map<String, List<HoodieRecordGlobalLocation>> readRecordIndex(List<String> recordKeys) {
+  public Map<String, HoodieRecordGlobalLocation> readRecordIndex(List<String> recordKeys) {
     throw new HoodieMetadataException("Unsupported operation: readRecordIndex!");
   }
 
   @Override
-  public Map<String, List<HoodieRecordGlobalLocation>> readSecondaryIndex(List<String> secondaryKeys, String partitionName) {
+  public Map<String, HoodieRecordGlobalLocation> readSecondaryIndex(List<String> secondaryKeys, String partitionName) {
     throw new HoodieMetadataException("Unsupported operation: readSecondaryIndex!");
   }
 
   @Override
   public int getNumFileGroupsForPartition(MetadataPartitionType partition) {
     throw new HoodieMetadataException("Unsupported operation: getNumFileGroupsForPartition");
+  }
+
+  @Override
+  public Map<Pair<String, StoragePath>, List<StoragePathInfo>> listPartitions(List<Pair<String, StoragePath>> partitionPathList) throws IOException {
+    Map<Pair<String, StoragePath>, List<StoragePathInfo>> pathInfoMap = new HashMap<>();
+
+    for (Pair<String, StoragePath> partitionPair : partitionPathList) {
+      StoragePath absolutePartitionPath = partitionPair.getRight();
+      try {
+        pathInfoMap.put(partitionPair, getStorage().listDirectEntries(absolutePartitionPath));
+      } catch (IOException e) {
+        if (!getStorage().exists(absolutePartitionPath)) {
+          pathInfoMap.put(partitionPair, Collections.emptyList());
+        } else {
+          // in case the partition path was created by another caller
+          pathInfoMap.put(partitionPair, getStorage().listDirectEntries(absolutePartitionPath));
+        }
+      }
+    }
+    return pathInfoMap;
   }
 }

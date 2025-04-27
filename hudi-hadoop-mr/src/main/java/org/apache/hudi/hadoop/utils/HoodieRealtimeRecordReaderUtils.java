@@ -208,15 +208,13 @@ public class HoodieRealtimeRecordReaderUtils {
           if (record.getSchema().getField(field.name()) != null) {
             fieldValue = record.get(field.name());
           } else {
-            if (LOG.isDebugEnabled()) {
-              LOG.debug("Field:" + field.name() + "not found in Schema:" + schema);
-            }
+            LOG.debug("Field: {} not found in Schema: {}", field.name(), schema);
           }
           recordValues[recordValueIndex++] = avroToArrayWritable(fieldValue, field.schema(), supportTimestamp);
         }
         return new ArrayWritable(Writable.class, recordValues);
       case ENUM:
-        return new Text(value.toString());
+        return new BytesWritable(value.toString().getBytes());
       case ARRAY:
         GenericArray arrayValue = (GenericArray) value;
         Writable[] arrayValues = new Writable[arrayValue.size()];

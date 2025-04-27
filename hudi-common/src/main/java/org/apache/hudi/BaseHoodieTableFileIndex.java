@@ -18,6 +18,7 @@
 
 package org.apache.hudi;
 
+import org.apache.hudi.common.config.HoodieMemoryConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieEngineContext;
@@ -26,15 +27,20 @@ import org.apache.hudi.common.model.BaseFile;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieTableQueryType;
+import org.apache.hudi.common.serialization.HoodieFileSliceSerializer;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.util.CollectionUtils;
+import org.apache.hudi.common.util.ConfigUtils;
+import org.apache.hudi.common.util.DefaultSizeEstimator;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
+import org.apache.hudi.common.util.collection.ExternalSpillableMap;
+import org.apache.hudi.common.util.collection.ExternalSpillableMap.DiskMapType;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
@@ -50,6 +56,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -62,6 +69,10 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static org.apache.hudi.common.config.HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED;
+import static org.apache.hudi.common.config.HoodieCommonConfig.HOODIE_FILE_INDEX_SPILLABLE_MEMORY;
+import static org.apache.hudi.common.config.HoodieCommonConfig.HOODIE_FILE_INDEX_USE_SPILLABLE_MAP;
+import static org.apache.hudi.common.config.HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE;
 import static org.apache.hudi.common.config.HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FOR_READERS;
 import static org.apache.hudi.common.config.HoodieMetadataConfig.ENABLE;
 import static org.apache.hudi.common.table.timeline.TimelineUtils.validateTimestampAsOf;
@@ -82,11 +93,11 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
   private final String[] partitionColumns;
 
   protected final HoodieMetadataConfig metadataConfig;
-
+  private final TypedProperties configProperties;
   private final HoodieTableQueryType queryType;
   private final Option<String> specifiedQueryInstant;
-  private final Option<String> beginInstantTime;
-  private final Option<String> endInstantTime;
+  private final Option<String> startCompletionTime;
+  private final Option<String> endCompletionTime;
   private final List<StoragePath> queryPaths;
 
   private final boolean shouldIncludePendingCommits;
@@ -118,17 +129,17 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
   private transient HoodieTableMetadata tableMetadata = null;
 
   /**
-   * @param engineContext Hudi engine-specific context
-   * @param metaClient Hudi table's meta-client
-   * @param configProperties unifying configuration (in the form of generic properties)
-   * @param queryType target query type
-   * @param queryPaths target DFS paths being queried
-   * @param specifiedQueryInstant instant as of which table is being queried
-   * @param shouldIncludePendingCommits flags whether file-index should exclude any pending operations
-   * @param shouldValidateInstant flags to validate whether query instant is present in the timeline
-   * @param fileStatusCache transient cache of fetched [[FileStatus]]es
-   * @param beginInstantTime begin instant time for incremental query (optional)
-   * @param endInstantTime end instant time for incremental query (optional)
+   * @param engineContext                Hudi engine-specific context
+   * @param metaClient                   Hudi table's meta-client
+   * @param configProperties             unifying configuration (in the form of generic properties)
+   * @param queryType                    target query type
+   * @param queryPaths                   target DFS paths being queried
+   * @param specifiedQueryInstant        instant as of which table is being queried
+   * @param shouldIncludePendingCommits  flags whether file-index should exclude any pending operations
+   * @param shouldValidateInstant        flags to validate whether query instant is present in the timeline
+   * @param fileStatusCache              transient cache of fetched [[FileStatus]]es
+   * @param startCompletionTime          start completion time for incremental query (optional)
+   * @param endCompletionTime            end completion time for incremental query (optional)
    */
   public BaseHoodieTableFileIndex(HoodieEngineContext engineContext,
                                   HoodieTableMetaClient metaClient,
@@ -140,8 +151,8 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
                                   boolean shouldValidateInstant,
                                   FileStatusCache fileStatusCache,
                                   boolean shouldListLazily,
-                                  Option<String> beginInstantTime,
-                                  Option<String> endInstantTime) {
+                                  Option<String> startCompletionTime,
+                                  Option<String> endCompletionTime) {
     this.partitionColumns = metaClient.getTableConfig().getPartitionFields()
         .orElseGet(() -> new String[0]);
 
@@ -157,19 +168,19 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     this.shouldIncludePendingCommits = shouldIncludePendingCommits;
     this.shouldValidateInstant = shouldValidateInstant;
     this.shouldListLazily = shouldListLazily;
-    this.beginInstantTime = beginInstantTime;
-    this.endInstantTime = endInstantTime;
+    this.startCompletionTime = startCompletionTime;
+    this.endCompletionTime = endCompletionTime;
 
     this.basePath = metaClient.getBasePath();
 
     this.metaClient = metaClient;
     this.engineContext = engineContext;
     this.fileStatusCache = fileStatusCache;
-
+    this.configProperties = configProperties;
     doRefresh();
   }
 
-  protected abstract Object[] doParsePartitionColumnValues(String[] partitionColumns, String partitionPath);
+  protected abstract Object[] parsePartitionColumnValues(String[] partitionColumns, String partitionPath);
 
   /**
    * Returns latest completed instant as seen by this instance of the file-index
@@ -193,6 +204,10 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
   @Override
   public void close() throws Exception {
     resetTableMetadata(null);
+  }
+
+  public HoodieTableQueryType getQueryType() {
+    return queryType;
   }
 
   protected String[] getPartitionColumns() {
@@ -263,29 +278,28 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     HoodieTimeline activeTimeline = getActiveTimeline();
     Option<HoodieInstant> latestInstant = activeTimeline.lastInstant();
 
-    HoodieTableFileSystemView fileSystemView =
-        new HoodieTableFileSystemView(metaClient, activeTimeline, allFiles);
+    try (HoodieTableFileSystemView fileSystemView = new HoodieTableFileSystemView(metaClient, activeTimeline, allFiles)) {
+      Option<String> queryInstant = specifiedQueryInstant.or(() -> latestInstant.map(HoodieInstant::requestedTime));
+      validate(activeTimeline, queryInstant);
 
-    Option<String> queryInstant = specifiedQueryInstant.or(() -> latestInstant.map(HoodieInstant::getTimestamp));
-
-    validate(activeTimeline, queryInstant);
-
-    // NOTE: For MOR table, when the compaction is inflight, we need to not only fetch the
-    // latest slices, but also include the base and log files of the second-last version of
-    // the file slice in the same file group as the latest file slice that is under compaction.
-    // This logic is realized by `AbstractTableFileSystemView::getLatestMergedFileSlicesBeforeOrOn`
-    // API.  Note that for COW table, the merging logic of two slices does not happen as there
-    // is no compaction, thus there is no performance impact.
-    return partitions.stream().collect(
-        Collectors.toMap(
-            Function.identity(),
-            partitionPath ->
-                queryInstant.map(instant ->
-                        fileSystemView.getLatestMergedFileSlicesBeforeOrOn(partitionPath.path, queryInstant.get())
-                    )
-                    .orElseGet(() -> fileSystemView.getLatestFileSlices(partitionPath.path))
-                    .collect(Collectors.toList())
-        ));
+      // NOTE: For MOR table, when the compaction is inflight, we need to not only fetch the
+      // latest slices, but also include the base and log files of the second-last version of
+      // the file slice in the same file group as the latest file slice that is under compaction.
+      // This logic is realized by `AbstractTableFileSystemView::getLatestMergedFileSlicesBeforeOrOn`
+      // API.  Note that for COW table, the merging logic of two slices does not happen as there
+      // is no compaction, thus there is no performance impact.
+      HoodieTableFileSystemView finalFileSystemView = fileSystemView;
+      return partitions.stream().collect(
+          Collectors.toMap(
+              Function.identity(),
+              partitionPath ->
+                  queryInstant.map(instant ->
+                          finalFileSystemView.getLatestMergedFileSlicesBeforeOrOn(partitionPath.path, queryInstant.get())
+                      )
+                      .orElseGet(() -> finalFileSystemView.getLatestFileSlices(partitionPath.path))
+                      .collect(Collectors.toList())
+          ));
+    }
   }
 
   protected List<PartitionPath> listPartitionPaths(List<String> relativePartitionPaths,
@@ -301,10 +315,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
 
     // Convert partition's path into partition descriptor
     return matchedPartitionPaths.stream()
-        .map(partitionPath -> {
-          Object[] partitionColumnValues = parsePartitionColumnValues(partitionColumns, partitionPath);
-          return new PartitionPath(partitionPath, partitionColumnValues);
-        })
+        .map(this::convertToPartitionPath)
         .collect(Collectors.toList());
   }
 
@@ -312,9 +323,12 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     List<String> matchedPartitionPaths;
     try {
       if (isPartitionedTable()) {
-        if (queryType == HoodieTableQueryType.INCREMENTAL && beginInstantTime.isPresent()) {
-          HoodieTimeline timelineAfterBeginInstant = TimelineUtils.getCommitsTimelineAfter(metaClient, beginInstantTime.get(), Option.empty());
-          HoodieTimeline timelineToQuery = endInstantTime.map(timelineAfterBeginInstant::findInstantsBeforeOrEquals).orElse(timelineAfterBeginInstant);
+        if (queryType == HoodieTableQueryType.INCREMENTAL && startCompletionTime.isPresent()
+            && !metaClient.getActiveTimeline().isBeforeTimelineStartsByCompletionTime(startCompletionTime.get())) {
+          HoodieTimeline timelineToQuery = metaClient.getActiveTimeline().getWriteTimeline()
+              .findInstantsInRangeByCompletionTime(
+                  startCompletionTime.get(),
+                  endCompletionTime.orElse(String.valueOf(Long.MAX_VALUE)));
           matchedPartitionPaths = TimelineUtils.getWrittenPartitions(timelineToQuery);
         } else {
           matchedPartitionPaths = tableMetadata.getPartitionPathWithPathPrefixes(relativePartitionPaths);
@@ -328,10 +342,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
 
     // Convert partition's path into partition descriptor
     return matchedPartitionPaths.stream()
-        .map(partitionPath -> {
-          Object[] partitionColumnValues = parsePartitionColumnValues(partitionColumns, partitionPath);
-          return new PartitionPath(partitionPath, partitionColumnValues);
-        })
+        .map(this::convertToPartitionPath)
         .collect(Collectors.toList());
   }
 
@@ -359,8 +370,8 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     }
   }
 
-  private Object[] parsePartitionColumnValues(String[] partitionColumns, String partitionPath) {
-    Object[] partitionColumnValues = doParsePartitionColumnValues(partitionColumns, partitionPath);
+  private Object[] getPartitionColumnValues(String[] partitionColumns, String partitionPath) {
+    Object[] partitionColumnValues = parsePartitionColumnValues(partitionColumns, partitionPath);
     if (shouldListLazily && partitionColumnValues.length != partitionColumns.length) {
       throw new HoodieException("Failed to parse partition column values from the partition-path:"
           + " likely non-encoded slashes being used in partition column's values. You can try to"
@@ -433,12 +444,26 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     // Reset it to null to trigger re-loading of all partition path
     this.cachedAllPartitionPaths = null;
     // Reset to force reload file slices inside partitions
-    this.cachedAllInputFileSlices = new HashMap<>();
+    try {
+      if (ConfigUtils.getBooleanWithAltKeys(configProperties, HOODIE_FILE_INDEX_USE_SPILLABLE_MAP)) {
+        long spillableMemory = ConfigUtils.getLongWithAltKeys(configProperties, HOODIE_FILE_INDEX_SPILLABLE_MEMORY);
+        String spillablePath = ConfigUtils.getStringWithAltKeys(configProperties, HoodieMemoryConfig.SPILLABLE_MAP_BASE_PATH, true);
+        DiskMapType diskMapType = ConfigUtils.getRawValueWithAltKeys(configProperties, SPILLABLE_DISK_MAP_TYPE, true);
+        boolean isBitCaskCompressionEnabled = ConfigUtils.getBooleanWithAltKeys(configProperties, DISK_MAP_BITCASK_COMPRESSION_ENABLED);
+        this.cachedAllInputFileSlices = new ExternalSpillableMap<>(
+            spillableMemory, spillablePath, new DefaultSizeEstimator<>(), new DefaultSizeEstimator<>(), diskMapType,
+            new HoodieFileSliceSerializer(), isBitCaskCompressionEnabled, this.getClass().getName());
+      } else {
+        this.cachedAllInputFileSlices = new HashMap<>();
+      }
+    } catch (IOException e) {
+      throw new HoodieIOException("Failed to refresh file index", e);
+    }
     if (!shouldListLazily) {
       ensurePreloadedPartitions(getAllQueryPartitionPaths());
     }
 
-    LOG.info(String.format("Refresh table %s, spent: %d ms", metaClient.getTableConfig().getTableName(), timer.endTimer()));
+    LOG.info("Refresh table {}, spent: {} ms", metaClient.getTableConfig().getTableName(), timer.endTimer());
   }
 
   private void validate(HoodieTimeline activeTimeline, Option<String> queryInstant) {
@@ -483,6 +508,11 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     return (partitionColumns.length > 0 && canParsePartitionValues()) || HoodieTableMetadata.isMetadataTable(basePath);
   }
 
+  protected PartitionPath convertToPartitionPath(String partitionPath) {
+    Object[] partitionColumnValues = getPartitionColumnValues(partitionColumns, partitionPath);
+    return new PartitionPath(partitionPath, partitionColumnValues);
+  }
+
   private static long fileSliceSize(FileSlice fileSlice) {
     long logFileSize = fileSlice.getLogFiles().map(HoodieLogFile::getFileSize)
         .filter(s -> s > 0)
@@ -517,7 +547,7 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
    * Partition path information containing the relative partition path
    * and values of partition columns.
    */
-  public static final class PartitionPath {
+  public static final class PartitionPath implements Serializable {
 
     final String path;
     final Object[] values;
@@ -553,5 +583,22 @@ public abstract class BaseHoodieTableFileIndex implements AutoCloseable {
     void put(StoragePath path, List<StoragePathInfo> leafFiles);
 
     void invalidate();
+  }
+
+  public static class NoopCache implements FileStatusCache {
+    @Override
+    public Option<List<StoragePathInfo>> get(StoragePath path) {
+      return Option.empty();
+    }
+
+    @Override
+    public void put(StoragePath path, List<StoragePathInfo> leafFiles) {
+      // no-op
+    }
+
+    @Override
+    public void invalidate() {
+      // no-op
+    }
   }
 }

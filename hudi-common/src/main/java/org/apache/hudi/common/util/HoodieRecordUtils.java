@@ -28,22 +28,22 @@ import org.apache.hudi.common.model.OperationModeAwareness;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.avro.generic.GenericRecord;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A utility class for HoodieRecord.
  */
 public class HoodieRecordUtils {
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieRecordUtils.class);
-
   private static final Map<String, Object> INSTANCE_CACHE = new HashMap<>();
+  private static final Map<String, Constructor<?>> CONSTRUCTOR_CACHE = new ConcurrentHashMap<>();
 
   static {
     INSTANCE_CACHE.put(HoodieAvroRecordMerger.class.getName(), HoodieAvroRecordMerger.INSTANCE);
@@ -79,32 +79,48 @@ public class HoodieRecordUtils {
     if (mergerClassList.isEmpty() || HoodieTableMetadata.isMetadataTable(basePath)) {
       return HoodieAvroRecordMerger.INSTANCE;
     } else {
-      return mergerClassList.stream()
-          .map(clazz -> loadRecordMerger(clazz))
-          .filter(Objects::nonNull)
-          .filter(merger -> merger.getMergingStrategy().equals(recordMergerStrategy))
-          .filter(merger -> recordTypeCompatibleEngine(merger.getRecordType(), engineType))
-          .findFirst()
+      return createValidRecordMerger(engineType, mergerClassList, recordMergerStrategy)
           .orElse(HoodieAvroRecordMerger.INSTANCE);
     }
+  }
+
+  public static Option<HoodieRecordMerger> createValidRecordMerger(EngineType engineType,
+                                                                   String mergerImpls, String recordMergerStrategy) {
+    return createValidRecordMerger(engineType,ConfigUtils.split2List(mergerImpls), recordMergerStrategy);
+  }
+
+  public static Option<HoodieRecordMerger> createValidRecordMerger(EngineType engineType,
+                                                                   List<String> mergeImplClassList,
+                                                                   String recordMergeStrategyId) {
+    return Option.fromJavaOptional(mergeImplClassList.stream()
+        .map(clazz -> loadRecordMerger(clazz))
+        .filter(Objects::nonNull)
+        .filter(merger -> merger.getMergingStrategy().equals(recordMergeStrategyId))
+        .filter(merger -> recordTypeCompatibleEngine(merger.getRecordType(), engineType))
+        .findFirst());
   }
 
   /**
    * Instantiate a given class with an avro record payload.
    */
-  public static <T extends HoodieRecordPayload> T loadPayload(String recordPayloadClass,
-                                                              Object[] payloadArgs,
-                                                              Class<?>... constructorArgTypes) {
+  public static <T extends HoodieRecordPayload> T loadPayload(String recordPayloadClass, GenericRecord record, Comparable orderingValue) {
     try {
-      return (T) ReflectionUtils.getClass(recordPayloadClass).getConstructor(constructorArgTypes)
-          .newInstance(payloadArgs);
-    } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+      return (T) CONSTRUCTOR_CACHE.computeIfAbsent(recordPayloadClass, key -> {
+        try {
+          return ReflectionUtils.getClass(recordPayloadClass).getConstructor(GenericRecord.class, Comparable.class);
+        } catch (NoSuchMethodException ex) {
+          throw new HoodieException("Unable to find constructor for payload class: " + recordPayloadClass, ex);
+        }
+      }).newInstance(record, orderingValue);
+    } catch (InstantiationException | IllegalAccessException | InvocationTargetException e) {
       throw new HoodieException("Unable to instantiate payload class ", e);
     }
   }
 
   public static boolean recordTypeCompatibleEngine(HoodieRecordType recordType, EngineType engineType) {
-    return engineType == EngineType.SPARK && recordType == HoodieRecordType.SPARK;
+    return (engineType == EngineType.SPARK && recordType == HoodieRecordType.SPARK)
+        || engineType == EngineType.FLINK && recordType == HoodieRecordType.FLINK
+        || (engineType == EngineType.JAVA && recordType == HoodieRecordType.AVRO);
   }
 
   public static HoodieRecordMerger mergerToPreCombineMode(HoodieRecordMerger merger) {

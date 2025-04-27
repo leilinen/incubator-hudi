@@ -19,7 +19,7 @@
 
 package org.apache.hudi
 
-import org.apache.hudi.RecordLevelIndexSupport.filterQueryWithRecordKey
+import org.apache.hudi.RecordLevelIndexSupport.{filterQueryWithRecordKey, getPrunedStoragePaths}
 import org.apache.hudi.SecondaryIndexSupport.filterQueriesWithSecondaryKey
 import org.apache.hudi.common.config.HoodieMetadataConfig
 import org.apache.hudi.common.fs.FSUtils
@@ -27,11 +27,12 @@ import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_SECONDARY_INDEX
 import org.apache.hudi.storage.StoragePath
+
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.Expression
 
+import scala.collection.{mutable, JavaConverters}
 import scala.collection.JavaConverters._
-import scala.collection.{JavaConverters, mutable}
 
 class SecondaryIndexSupport(spark: SparkSession,
                             metadataConfig: HoodieMetadataConfig,
@@ -50,8 +51,8 @@ class SecondaryIndexSupport(spark: SparkSession,
     }
     lazy val (_, secondaryKeys) = if (isIndexAvailable) filterQueriesWithSecondaryKey(queryFilters, secondaryKeyConfigOpt.map(_._2)) else (List.empty, List.empty)
     if (isIndexAvailable && queryFilters.nonEmpty && secondaryKeys.nonEmpty) {
-      val allFiles = fileIndex.inputFiles.map(strPath => new StoragePath(strPath)).toSeq
-      Some(getCandidateFilesFromSecondaryIndex(allFiles, secondaryKeys, secondaryKeyConfigOpt.get._1))
+      val prunedStoragePaths = getPrunedStoragePaths(prunedPartitionsAndFileSlices, fileIndex)
+      Some(getCandidateFilesFromSecondaryIndex(prunedStoragePaths, secondaryKeys, secondaryKeyConfigOpt.get._1))
     } else {
       Option.empty
     }
@@ -62,7 +63,7 @@ class SecondaryIndexSupport(spark: SparkSession,
   }
 
   /**
-   * Return true if metadata table is enabled and functional index metadata partition is available.
+   * Return true if metadata table is enabled and expression index metadata partition is available.
    */
   override def isIndexAvailable: Boolean = {
     metadataConfig.isEnabled && metaClient.getIndexMetadata.isPresent && !metaClient.getIndexMetadata.get().getIndexDefinitions.isEmpty
@@ -79,11 +80,7 @@ class SecondaryIndexSupport(spark: SparkSession,
     val recordKeyLocationsMap = metadataTable.readSecondaryIndex(JavaConverters.seqAsJavaListConverter(secondaryKeys).asJava, secondaryIndexName)
     val fileIdToPartitionMap: mutable.Map[String, String] = mutable.Map.empty
     val candidateFiles: mutable.Set[String] = mutable.Set.empty
-    for (locations <- JavaConverters.collectionAsScalaIterableConverter(recordKeyLocationsMap.values()).asScala) {
-      for (location <- JavaConverters.collectionAsScalaIterableConverter(locations).asScala) {
-        fileIdToPartitionMap.put(location.getFileId, location.getPartitionPath)
-      }
-    }
+    recordKeyLocationsMap.values().forEach(location => fileIdToPartitionMap.put(location.getFileId, location.getPartitionPath))
 
     for (file <- allFiles) {
       val fileId = FSUtils.getFileIdFromFilePath(file)
@@ -97,7 +94,7 @@ class SecondaryIndexSupport(spark: SparkSession,
 
   /**
    * Returns the configured secondary key for the table
-   * TODO: Handle multiple secondary indexes (similar to functional index)
+   * TODO: [HUDI-8302] Handle multiple secondary indexes (similar to expression index)
    */
   private def getSecondaryKeyConfig(queryReferencedColumns: Seq[String],
                                     metaClient: HoodieTableMetaClient): Option[(String, String)] = {
@@ -116,12 +113,14 @@ object SecondaryIndexSupport {
                                     secondaryKeyConfigOpt: Option[String]): (List[Expression], List[String]) = {
     var secondaryKeyQueries: List[Expression] = List.empty
     var secondaryKeys: List[String] = List.empty
-    for (query <- queryFilters) {
-      filterQueryWithRecordKey(query, secondaryKeyConfigOpt).foreach({
-        case (exp: Expression, recKeys: List[String]) =>
-          secondaryKeys = secondaryKeys ++ recKeys
-          secondaryKeyQueries = secondaryKeyQueries :+ exp
-      })
+    if (secondaryKeyConfigOpt.isDefined) {
+      for (query <- queryFilters) {
+        filterQueryWithRecordKey(query, secondaryKeyConfigOpt).foreach({
+          case (exp: Expression, recKeys: List[String]) =>
+            secondaryKeys = secondaryKeys ++ recKeys
+            secondaryKeyQueries = secondaryKeyQueries :+ exp
+        })
+      }
     }
 
     Tuple2.apply(secondaryKeyQueries, secondaryKeys)

@@ -26,6 +26,7 @@ import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.table.timeline.dto.BaseFileDTO;
 import org.apache.hudi.common.table.timeline.dto.ClusteringOpDTO;
 import org.apache.hudi.common.table.timeline.dto.CompactionOpDTO;
@@ -35,19 +36,16 @@ import org.apache.hudi.common.table.timeline.dto.FileSliceDTO;
 import org.apache.hudi.common.table.timeline.dto.InstantDTO;
 import org.apache.hudi.common.table.timeline.dto.TimelineDTO;
 import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.RetryHelper;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieRemoteException;
+import org.apache.hudi.timeline.TimelineServiceClient;
+import org.apache.hudi.timeline.TimelineServiceClientBase;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.module.afterburner.AfterburnerModule;
-import org.apache.http.Consts;
-import org.apache.http.client.fluent.Request;
-import org.apache.http.client.fluent.Response;
-import org.apache.http.client.utils.URIBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +56,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.apache.hudi.timeline.TimelineServiceClient.RequestMethod;
 
 /**
  * A proxy for table file-system view which translates local View API calls to REST calls to remote timeline service.
@@ -137,20 +137,12 @@ public class RemoteHoodieTableFileSystemView implements SyncableFileSystemView, 
   private static final TypeReference<Map<String, List<BaseFileDTO>>> BASE_FILE_MAP_REFERENCE = new TypeReference<Map<String, List<BaseFileDTO>>>() {};
   private static final TypeReference<Map<String, List<FileSliceDTO>>> FILE_SLICE_MAP_REFERENCE = new TypeReference<Map<String, List<FileSliceDTO>>>() {};
 
-  private final String serverHost;
-  private final int serverPort;
   private final String basePath;
   private final HoodieTableMetaClient metaClient;
   private HoodieTimeline timeline;
-  private final int timeoutMs;
+  private final TimelineServiceClientBase timelineServiceClient;
 
   private boolean closed = false;
-
-  private RetryHelper<Response, IOException> retryHelper;
-
-  private enum RequestMethod {
-    GET, POST
-  }
 
   public RemoteHoodieTableFileSystemView(String server, int port, HoodieTableMetaClient metaClient) {
     this(metaClient, FileSystemViewStorageConfig.newBuilder().withRemoteServerHost(server).withRemoteServerPort(port).build());
@@ -160,35 +152,20 @@ public class RemoteHoodieTableFileSystemView implements SyncableFileSystemView, 
     this.basePath = metaClient.getBasePath().toString();
     this.metaClient = metaClient;
     this.timeline = metaClient.getActiveTimeline().filterCompletedAndCompactionInstants();
-    this.serverHost = viewConf.getRemoteViewServerHost();
-    this.serverPort = viewConf.getRemoteViewServerPort();
-    this.timeoutMs = viewConf.getRemoteTimelineClientTimeoutSecs() * 1000;
-    if (viewConf.isRemoteTimelineClientRetryEnabled()) {
-      retryHelper = new RetryHelper(
-          viewConf.getRemoteTimelineClientMaxRetryIntervalMs(),
-          viewConf.getRemoteTimelineClientMaxRetryNumbers(),
-          viewConf.getRemoteTimelineInitialRetryIntervalMs(),
-          viewConf.getRemoteTimelineClientRetryExceptions(),
-          "Sending request");
-    }
+    this.timelineServiceClient = new TimelineServiceClient(viewConf);
   }
 
   private <T> T executeRequest(String requestPath, Map<String, String> queryParameters, TypeReference<T> reference,
                                RequestMethod method) throws IOException {
     ValidationUtils.checkArgument(!closed, "View already closed");
 
-    URIBuilder builder = new URIBuilder().setHost(serverHost).setPort(serverPort).setPath(requestPath).setScheme(SCHEME);
-    queryParameters.forEach(builder::addParameter);
-
     // Adding mandatory parameters - Last instants affecting file-slice
-    timeline.lastInstant().ifPresent(instant -> builder.addParameter(LAST_INSTANT_TS, instant.getTimestamp()));
-    builder.addParameter(TIMELINE_HASH, timeline.getTimelineHash());
+    timeline.lastInstant().ifPresent(instant -> queryParameters.put(LAST_INSTANT_TS, instant.requestedTime()));
+    queryParameters.put(TIMELINE_HASH, timeline.getTimelineHash());
 
-    String url = builder.toString();
-    LOG.info("Sending request : ({})", url);
-    Response response = retryHelper != null ? retryHelper.start(() -> get(timeoutMs, url, method)) : get(timeoutMs, url, method);
-    String content = response.returnContent().asString(Consts.UTF_8);
-    return (T) OBJECT_MAPPER.readValue(content, reference);
+    return timelineServiceClient.makeRequest(
+            TimelineServiceClient.Request.newBuilder(method, requestPath).addQueryParams(queryParameters).build())
+        .getDecodedContent(reference);
   }
 
   private Map<String, String> getParamsWithPartitionPath(String partitionPath) {
@@ -500,7 +477,8 @@ public class RemoteHoodieTableFileSystemView implements SyncableFileSystemView, 
     try {
       List<ClusteringOpDTO> dtos = executeRequest(PENDING_CLUSTERING_FILEGROUPS_URL, paramsMap,
           CLUSTERING_OP_DTOS_REFERENCE, RequestMethod.GET);
-      return dtos.stream().map(ClusteringOpDTO::toClusteringOperation);
+      InstantGenerator factory = metaClient.getInstantGenerator();
+      return dtos.stream().map(dto -> ClusteringOpDTO.toClusteringOperation(dto, factory));
     } catch (IOException e) {
       throw new HoodieRemoteException(e);
     }
@@ -511,7 +489,8 @@ public class RemoteHoodieTableFileSystemView implements SyncableFileSystemView, 
     Map<String, String> paramsMap = getParams();
     try {
       List<InstantDTO> instants = executeRequest(LAST_INSTANT_URL, paramsMap, INSTANT_DTOS_REFERENCE, RequestMethod.GET);
-      return Option.fromJavaOptional(instants.stream().map(InstantDTO::toInstant).findFirst());
+      return Option.fromJavaOptional(instants.stream()
+          .map(dto -> InstantDTO.toInstant(dto, metaClient.getInstantGenerator())).findFirst());
     } catch (IOException e) {
       throw new HoodieRemoteException(e);
     }
@@ -541,15 +520,5 @@ public class RemoteHoodieTableFileSystemView implements SyncableFileSystemView, 
   @Override
   public void sync() {
     refresh();
-  }
-
-  private Response get(int timeoutMs, String url, RequestMethod method) throws IOException {
-    switch (method) {
-      case GET:
-        return Request.Get(url).connectTimeout(timeoutMs).socketTimeout(timeoutMs).execute();
-      case POST:
-      default:
-        return Request.Post(url).connectTimeout(timeoutMs).socketTimeout(timeoutMs).execute();
-    }
   }
 }

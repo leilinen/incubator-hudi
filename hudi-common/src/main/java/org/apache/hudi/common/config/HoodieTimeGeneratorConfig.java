@@ -53,7 +53,17 @@ public class HoodieTimeGeneratorConfig extends HoodieConfig {
       })
       .sinceVersion("1.0.0")
       .markAdvanced()
-      .withDocumentation("The max expected clock skew time for WaitBasedTimeGenerator in ms");
+      .withDocumentation("The max expected clock skew time in ms between two processes generating time. Used by "
+          + TimeGeneratorType.WAIT_TO_ADJUST_SKEW.name() + " time generator to implement TrueTime semantics.");
+
+  public static final ConfigProperty<Boolean> TIME_GENERATOR_REUSE_ENABLE = ConfigProperty
+      .key("_hoodie.time.generator.reuse.enable")
+      .defaultValue(false)
+      .sinceVersion("1.0.1")
+      .markAdvanced()
+      .withDocumentation("Used only for internal purposes. TimeGeneratos are cached per table base path and re-used across invocations. "
+          + "For some internal purposes, we wanted to avoid using the cached TimeGenerator (like upgrade flows). Hence this config "
+          + "will be used internally during upgrade flow. No advisable for end user to use this config. ");
 
   private HoodieTimeGeneratorConfig() {
     super();
@@ -65,6 +75,10 @@ public class HoodieTimeGeneratorConfig extends HoodieConfig {
 
   public long getMaxExpectedClockSkewMs() {
     return getLong(MAX_EXPECTED_CLOCK_SKEW_MS);
+  }
+
+  public boolean canReuseTimeGenerator() {
+    return getBoolean(TIME_GENERATOR_REUSE_ENABLE);
   }
 
   public String getBasePath() {
@@ -107,17 +121,21 @@ public class HoodieTimeGeneratorConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder withReuseTimeGenerator(boolean reuseTimeGenerator) {
+      timeGeneratorConfig.setValue(TIME_GENERATOR_REUSE_ENABLE, String.valueOf(reuseTimeGenerator));
+      return this;
+    }
+
     public Builder withPath(String basePath) {
       timeGeneratorConfig.setValue(BASE_PATH, basePath);
       return this;
     }
 
     public HoodieTimeGeneratorConfig build() {
-      timeGeneratorConfig.setDefaults(HoodieTimeGeneratorConfig.class.getName());
-
       if (!timeGeneratorConfig.contains(LOCK_PROVIDER_KEY)) {
         timeGeneratorConfig.setValue(LOCK_PROVIDER_KEY, DEFAULT_LOCK_PROVIDER);
       }
+      timeGeneratorConfig.setDefaults(HoodieTimeGeneratorConfig.class.getName());
       return timeGeneratorConfig;
     }
   }

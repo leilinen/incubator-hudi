@@ -21,7 +21,6 @@ package org.apache.hudi.connect.writers;
 import org.apache.hudi.client.HoodieJavaWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieJavaEngineContext;
-import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
@@ -86,20 +85,21 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
 
     try {
       KeyGenerator keyGenerator = HoodieAvroKeyGeneratorFactory.createAvroKeyGeneratorByType(
-          new TypedProperties(connectConfigs.getProps()));
+          connectConfigs.getProps());
       String recordKeyFields = KafkaConnectUtils.getRecordKeyColumns(keyGenerator);
-      String partitionColumns = KafkaConnectUtils.getPartitionColumns(keyGenerator,
-          new TypedProperties(connectConfigs.getProps()));
+      String partitionColumns = KafkaConnectUtils.getPartitionColumnsForKeyGenerator(keyGenerator,
+          connectConfigs.getProps());
 
       LOG.info(String.format("Setting record key %s and partition fields %s for table %s",
           recordKeyFields, partitionColumns, tableBasePath + tableName));
 
-      tableMetaClient = Option.of(HoodieTableMetaClient.withPropertyBuilder()
+      tableMetaClient = Option.of(HoodieTableMetaClient.newTableBuilder()
           .setTableType(HoodieTableType.COPY_ON_WRITE.name())
           .setTableName(tableName)
           .setPayloadClassName(HoodieAvroPayload.class.getName())
           .setRecordKeyFields(recordKeyFields)
           .setPartitionFields(partitionColumns)
+          .setTableVersion(writeConfig.getWriteVersion())
           .setKeyGeneratorClassProp(writeConfig.getKeyGeneratorClass())
           .fromProperties(connectConfigs.getProps())
           .initTable(storageConf.newInstance(), tableBasePath));

@@ -26,14 +26,12 @@ import org.apache.hudi.common.table.view.FileSystemViewManager;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
-import org.apache.hudi.storage.HoodieStorage;
-import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StorageConfiguration;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import io.javalin.Javalin;
-import org.apache.hadoop.conf.Configuration;
+import io.javalin.core.util.JavalinBindException;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.eclipse.jetty.util.thread.ScheduledExecutorScheduler;
@@ -42,8 +40,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Serializable;
-
-import static org.apache.hudi.hadoop.fs.HadoopFSUtils.prepareHadoopConf;
 
 /**
  * A standalone timeline service exposing File-System View interfaces to clients.
@@ -56,9 +52,8 @@ public class TimelineService {
 
   private int serverPort;
   private final Config timelineServerConf;
-  private final StorageConfiguration<?> conf;
+  private final StorageConfiguration<?> storageConf;
   private transient HoodieEngineContext context;
-  private transient HoodieStorage storage;
   private transient Javalin app = null;
   private transient FileSystemViewManager fsViewsManager;
   private transient RequestHandler requestHandler;
@@ -67,13 +62,12 @@ public class TimelineService {
     return serverPort;
   }
 
-  public TimelineService(HoodieEngineContext context, Configuration hadoopConf, Config timelineServerConf,
-                         HoodieStorage storage, FileSystemViewManager globalFileSystemViewManager) throws IOException {
-    this.conf = HadoopFSUtils.getStorageConf(prepareHadoopConf(hadoopConf));
+  public TimelineService(HoodieEngineContext context, StorageConfiguration<?> storageConf, Config timelineServerConf,
+                         FileSystemViewManager globalFileSystemViewManager) {
+    this.storageConf = storageConf;
     this.timelineServerConf = timelineServerConf;
     this.serverPort = timelineServerConf.serverPort;
     this.context = context;
-    this.storage = storage;
     this.fsViewsManager = globalFileSystemViewManager;
   }
 
@@ -347,18 +341,18 @@ public class TimelineService {
       // Returns port to try when trying to bind a service. Handles wrapping and skipping privileged ports.
       int tryPort = port == 0 ? port : (port + attempt - 1024) % (65536 - 1024) + 1024;
       try {
+        createApp();
         app.start(tryPort);
         return app.port();
       } catch (Exception e) {
-        if (e.getMessage() != null && e.getMessage().contains("Failed to bind to")) {
+        if (e instanceof JavalinBindException) {
           if (tryPort == 0) {
             LOG.warn("Timeline server could not bind on a random free port.");
           } else {
-            LOG.warn(String.format("Timeline server could not bind on port %d. "
-                + "Attempting port %d + 1.",tryPort, tryPort));
+            LOG.warn("Timeline server could not bind on port {}. Attempting port {} + 1.", tryPort, tryPort);
           }
         } else {
-          LOG.warn(String.format("Timeline server start failed on port %d. Attempting port %d + 1.",tryPort, tryPort), e);
+          LOG.warn("Timeline server start failed on port {}. Attempting port {} + 1.", tryPort, tryPort, e);
         }
       }
     }
@@ -366,6 +360,17 @@ public class TimelineService {
   }
 
   public int startService() throws IOException {
+    int realServerPort = startServiceOnPort(serverPort);
+    LOG.info("Starting Timeline server on port: {}", realServerPort);
+    this.serverPort = realServerPort;
+    return realServerPort;
+  }
+
+  private void createApp() {
+    // if app needs to be recreated, stop the existing one
+    if (app != null) {
+      app.stop();
+    }
     int maxThreads = timelineServerConf.numThreads > 0 ? timelineServerConf.numThreads : DEFAULT_NUM_THREADS;
     QueuedThreadPool pool = new QueuedThreadPool(maxThreads, 8, 60_000);
     pool.setDaemon(true);
@@ -381,13 +386,9 @@ public class TimelineService {
     });
 
     requestHandler = new RequestHandler(
-        app, conf, timelineServerConf, context, storage, fsViewsManager);
+        app, storageConf, timelineServerConf, context, fsViewsManager);
     app.get("/", ctx -> ctx.result("Hello Hudi"));
     requestHandler.register();
-    int realServerPort = startServiceOnPort(serverPort);
-    LOG.info("Starting Timeline server on port :" + realServerPort);
-    this.serverPort = realServerPort;
-    return realServerPort;
   }
 
   public void run() throws IOException {
@@ -404,20 +405,20 @@ public class TimelineService {
       case MEMORY:
         FileSystemViewStorageConfig.Builder inMemConfBuilder = FileSystemViewStorageConfig.newBuilder();
         inMemConfBuilder.withStorageType(FileSystemViewStorageType.MEMORY);
-        return FileSystemViewManager.createViewManager(localEngineContext, inMemConfBuilder.build(), commonConfig);
+        return FileSystemViewManager.createViewManager(localEngineContext, metadataConfig, inMemConfBuilder.build(), commonConfig);
       case SPILLABLE_DISK: {
         FileSystemViewStorageConfig.Builder spillableConfBuilder = FileSystemViewStorageConfig.newBuilder();
         spillableConfBuilder.withStorageType(FileSystemViewStorageType.SPILLABLE_DISK)
             .withBaseStoreDir(config.baseStorePathForFileGroups)
             .withMaxMemoryForView(config.maxViewMemPerTableInMB * 1024 * 1024L)
             .withMemFractionForPendingCompaction(config.memFractionForCompactionPerTable);
-        return FileSystemViewManager.createViewManager(localEngineContext, spillableConfBuilder.build(), commonConfig);
+        return FileSystemViewManager.createViewManager(localEngineContext, metadataConfig, spillableConfBuilder.build(), commonConfig);
       }
       case EMBEDDED_KV_STORE: {
         FileSystemViewStorageConfig.Builder rocksDBConfBuilder = FileSystemViewStorageConfig.newBuilder();
         rocksDBConfBuilder.withStorageType(FileSystemViewStorageType.EMBEDDED_KV_STORE)
             .withRocksDBPath(config.rocksDBPath);
-        return FileSystemViewManager.createViewManager(localEngineContext, rocksDBConfBuilder.build(), commonConfig);
+        return FileSystemViewManager.createViewManager(localEngineContext, metadataConfig, rocksDBConfBuilder.build(), commonConfig);
       }
       default:
         throw new IllegalArgumentException("Invalid view manager storage type :" + config.viewStorageType);
@@ -441,12 +442,8 @@ public class TimelineService {
     fsViewsManager.clearFileSystemView(basePath);
   }
 
-  public StorageConfiguration<?> getConf() {
-    return conf;
-  }
-
-  public HoodieStorage getStorage() {
-    return storage;
+  public StorageConfiguration<?> getStorageConf() {
+    return storageConf;
   }
 
   public static void main(String[] args) throws Exception {
@@ -457,14 +454,13 @@ public class TimelineService {
       System.exit(1);
     }
 
-    Configuration conf = HadoopFSUtils.prepareHadoopConf(new Configuration());
+    StorageConfiguration<?> storageConf = HadoopFSUtils.getStorageConf();
     FileSystemViewManager viewManager =
-        buildFileSystemViewManager(cfg, HadoopFSUtils.getStorageConfWithCopy(conf));
+        buildFileSystemViewManager(cfg, storageConf.newInstance());
     TimelineService service = new TimelineService(
-        new HoodieLocalEngineContext(
-            HadoopFSUtils.getStorageConf(HadoopFSUtils.prepareHadoopConf(new Configuration()))),
-        new Configuration(), cfg,
-        HoodieStorageUtils.getStorage(HadoopFSUtils.getStorageConf(new Configuration())),
+        new HoodieLocalEngineContext(storageConf.newInstance()),
+        storageConf.newInstance(),
+        cfg,
         viewManager);
     service.run();
   }

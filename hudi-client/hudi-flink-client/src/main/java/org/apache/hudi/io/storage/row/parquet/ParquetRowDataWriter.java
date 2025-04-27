@@ -506,6 +506,14 @@ public class ParquetRowDataWriter {
     private void doWrite(ArrayData arrayData) {
       recordConsumer.startGroup();
       if (arrayData.size() > 0) {
+        // align with Spark And Avro regarding the standard mode array type, see:
+        // https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#lists
+        //
+        // <list-repetition> group <name> (LIST) {
+        //   repeated group list {
+        //     <element-repetition> <element-type> element;
+        //   }
+        // }
         final String repeatedGroup = "list";
         final String elementField = "element";
         recordConsumer.startField(repeatedGroup, 0);

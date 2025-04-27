@@ -73,7 +73,7 @@ public class DFSPropertiesConfiguration extends PropertiesConfig {
   @Nullable
   private final Configuration hadoopConfig;
 
-  private StoragePath mainFilePath;
+  private final StoragePath mainFilePath;
 
   // props read from user defined configuration file or input stream
   private final HoodieConfig hoodieConfig;
@@ -117,15 +117,14 @@ public class DFSPropertiesConfiguration extends PropertiesConfig {
       }
     }
     // Try loading the external config file from local file system
+    try {
+      conf.addPropsFromFile(DEFAULT_PATH);
+    } catch (Exception e) {
+      LOG.warn("Cannot load default config file: " + DEFAULT_PATH, e);
+    }
     Option<StoragePath> defaultConfPath = getConfPathFromEnv();
-    if (defaultConfPath.isPresent()) {
+    if (defaultConfPath.isPresent() && !defaultConfPath.get().equals(DEFAULT_PATH)) {
       conf.addPropsFromFile(defaultConfPath.get());
-    } else {
-      try {
-        conf.addPropsFromFile(DEFAULT_PATH);
-      } catch (Exception e) {
-        LOG.warn("Cannot load default config file: " + DEFAULT_PATH, e);
-      }
     }
     return conf.getProps();
   }
@@ -222,11 +221,11 @@ public class DFSPropertiesConfiguration extends PropertiesConfig {
   }
 
   public TypedProperties getProps() {
-    return new TypedProperties(hoodieConfig.getProps());
+    return TypedProperties.copy(hoodieConfig.getProps());
   }
 
   public TypedProperties getProps(boolean includeGlobalProps) {
-    return new TypedProperties(hoodieConfig.getProps(includeGlobalProps));
+    return TypedProperties.copy(hoodieConfig.getProps(includeGlobalProps));
   }
 
   private static Option<StoragePath> getConfPathFromEnv() {
