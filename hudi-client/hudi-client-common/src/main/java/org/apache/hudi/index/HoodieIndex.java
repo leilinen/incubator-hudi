@@ -159,12 +159,6 @@ public abstract class HoodieIndex<I, O> implements Serializable {
       + "for the location in the existing table. Default is SIMPLE on Spark engine, and INMEMORY "
       + "on Flink and Java engines.")
   public enum IndexType {
-
-    @EnumFieldDescription("uses an external managed Apache HBase table to store record key to "
-        + "location mapping. HBase index is a global index, enforcing key uniqueness across all "
-        + "partitions in the table.")
-    HBASE,
-
     @EnumFieldDescription("Uses in-memory hashmap in Spark and Java engine and Flink in-memory "
         + "state in Flink for indexing.")
     INMEMORY,
@@ -197,10 +191,28 @@ public abstract class HoodieIndex<I, O> implements Serializable {
     @EnumFieldDescription("Internal Config for indexing based on Flink state.")
     FLINK_STATE,
 
+    @Deprecated
     @EnumFieldDescription("Index which saves the record key to location mappings in the "
         + "HUDI Metadata Table. Record index is a global index, enforcing key uniqueness across all "
-        + "partitions in the table. Supports sharding to achieve very high scale.")
-    RECORD_INDEX
+        + "partitions in the table. Supports sharding to achieve very high scale. For a table with "
+        + "keys that are only unique inside each partition, use `RECORD_LEVEL_INDEX` instead. "
+        + "This enum is deprecated. Use GLOBAL_RECORD_LEVEL_INDEX for global uniqueness of record "
+        + "keys or RECORD_LEVEL_INDEX for partition-level uniqueness of record keys.")
+    RECORD_INDEX,
+
+    @EnumFieldDescription("Index which saves the record key to location mappings in the "
+        + "HUDI Metadata Table. Record index is a global index, enforcing key uniqueness across all "
+        + "partitions in the table. Supports sharding to achieve very high scale. For a table with "
+        + "keys that are only unique inside each partition, use `RECORD_LEVEL_INDEX` instead.")
+    GLOBAL_RECORD_LEVEL_INDEX,
+
+    @EnumFieldDescription("Index which saves the record key to location mappings in the "
+        + "HUDI Metadata Table. Supports sharding to achieve very high scale. This is a "
+        + "non global index, where keys can be replicated across partitions, since a "
+        + "pair of partition path and record keys will uniquely map to a location using "
+        + "this index. If users expect record keys to be unique across all partitions, "
+        + "use `GLOBAL_RECORD_LEVEL_INDEX` instead.")
+    RECORD_LEVEL_INDEX
   }
 
   @EnumDescription("Determines the type of bucketing or hashing to use when `hoodie.index.type`"

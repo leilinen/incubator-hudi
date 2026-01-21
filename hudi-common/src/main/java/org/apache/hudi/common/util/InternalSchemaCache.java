@@ -18,8 +18,8 @@
 
 package org.apache.hudi.common.util;
 
-import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.CommitMetadataSerDe;
@@ -33,7 +33,7 @@ import org.apache.hudi.common.table.timeline.TimelinePathProvider;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.internal.schema.InternalSchema;
-import org.apache.hudi.internal.schema.convert.AvroInternalSchemaConverter;
+import org.apache.hudi.internal.schema.convert.InternalSchemaConverter;
 import org.apache.hudi.internal.schema.io.FileBasedInternalSchemaStorageManager;
 import org.apache.hudi.internal.schema.utils.InternalSchemaUtils;
 import org.apache.hudi.internal.schema.utils.SerDeHelper;
@@ -43,7 +43,6 @@ import org.apache.hudi.storage.StoragePathInfo;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import org.apache.avro.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -79,18 +78,15 @@ public class InternalSchemaCache {
 
   /**
    * Search internalSchema based on versionID.
-   * first step: try to get internalSchema from hoodie commit files, we no need to add lock.
-   * if we cannot get internalSchema by first step, then we try to get internalSchema from cache.
+   *
+   * <p>The internalSchema is fetched from cache or history schema file directly, and should not
+   * be fetched from commit meta file since the overhead of scanning timeline is higher.
    *
    * @param versionID  schema version_id need to search
    * @param metaClient current hoodie metaClient
    * @return internalSchema
    */
   public static InternalSchema searchSchemaAndCache(long versionID, HoodieTableMetaClient metaClient) {
-    Option<InternalSchema> candidateSchema = getSchemaByReadingCommitFile(versionID, metaClient);
-    if (candidateSchema.isPresent()) {
-      return candidateSchema.get();
-    }
     String tablePath = metaClient.getBasePath().toString();
     // use segment lock to reduce competition.
     synchronized (LOCK_LIST[tablePath.hashCode() & (LOCK_LIST.length - 1)]) {
@@ -99,8 +95,7 @@ public class InternalSchemaCache {
         historicalSchemas = getHistoricalSchemas(metaClient);
         HISTORICAL_SCHEMA_CACHE.put(tablePath, historicalSchemas);
       } else {
-        long maxVersionId = historicalSchemas.keySet().stream().max(Long::compareTo).get();
-        if (versionID > maxVersionId) {
+        if (historicalSchemas.keySet().stream().max(Long::compareTo).map(maxVersionId -> versionID > maxVersionId).orElse(false)) {
           historicalSchemas = getHistoricalSchemas(metaClient);
           HISTORICAL_SCHEMA_CACHE.put(tablePath, historicalSchemas);
         }
@@ -117,21 +112,6 @@ public class InternalSchemaCache {
       result = SerDeHelper.parseSchemas(historySchemaStr);
     }
     return result;
-  }
-
-  private static Option<InternalSchema> getSchemaByReadingCommitFile(long versionID, HoodieTableMetaClient metaClient) {
-    try {
-      HoodieTimeline timeline = metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
-      List<HoodieInstant> instants = timeline.getInstantsAsStream().filter(f -> f.requestedTime().equals(String.valueOf(versionID))).collect(Collectors.toList());
-      if (instants.isEmpty()) {
-        return Option.empty();
-      }
-      HoodieCommitMetadata metadata = timeline.readCommitMetadata(instants.get(0));
-      String latestInternalSchemaStr = metadata.getMetadata(SerDeHelper.LATEST_SCHEMA);
-      return SerDeHelper.fromJson(latestInternalSchemaStr);
-    } catch (Exception e) {
-      throw new HoodieException("Failed to read schema from commit metadata", e);
-    }
   }
 
   /**
@@ -234,7 +214,7 @@ public class InternalSchemaCache {
     return fileSchema.isEmptySchema()
         ? StringUtils.isNullOrEmpty(avroSchema)
         ? InternalSchema.getEmptyInternalSchema()
-        : AvroInternalSchemaConverter.convert(HoodieAvroUtils.addMetadataFields(new Schema.Parser().parse(avroSchema)))
+        : InternalSchemaConverter.convert(HoodieSchemaUtils.createHoodieWriteSchema(avroSchema, false))
         : fileSchema;
   }
 

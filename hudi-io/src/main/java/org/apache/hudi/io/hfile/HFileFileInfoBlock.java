@@ -22,12 +22,17 @@ package org.apache.hudi.io.hfile;
 import org.apache.hudi.io.hfile.protobuf.generated.HFileProtos;
 import org.apache.hudi.io.util.IOUtils;
 
+import com.google.protobuf.ByteString;
+
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
 import static org.apache.hudi.common.util.StringUtils.fromUTF8Bytes;
+import static org.apache.hudi.common.util.StringUtils.getUTF8Bytes;
 
 /**
  * Represents a {@link HFileBlockType#FILE_INFO} block.
@@ -35,11 +40,21 @@ import static org.apache.hudi.common.util.StringUtils.fromUTF8Bytes;
 public class HFileFileInfoBlock extends HFileBlock {
   // Magic we put ahead of a serialized protobuf message
   public static final byte[] PB_MAGIC = new byte[] {'P', 'B', 'U', 'F'};
+  // Write properties
+  private final Map<String, byte[]> fileInfoToWrite = new HashMap<>();
 
   public HFileFileInfoBlock(HFileContext context,
                             byte[] byteBuff,
                             int startOffsetInBuff) {
     super(context, HFileBlockType.FILE_INFO, byteBuff, startOffsetInBuff);
+  }
+
+  private HFileFileInfoBlock(HFileContext context) {
+    super(context, HFileBlockType.FILE_INFO, -1L);
+  }
+
+  public static HFileFileInfoBlock createFileInfoBlockToWrite(HFileContext context) {
+    return new HFileFileInfoBlock(context);
   }
 
   public HFileInfo readFileInfo() throws IOException {
@@ -60,5 +75,39 @@ public class HFileFileInfoBlock extends HFileBlock {
           new UTF8StringKey(pair.getFirst().toByteArray()), pair.getSecond().toByteArray());
     }
     return new HFileInfo(fileInfoMap);
+  }
+
+  // ================ Below are for Write ================
+
+  public void add(String name, byte[] value) {
+    fileInfoToWrite.put(name, value);
+  }
+
+  public boolean containsKey(String name) {
+    return fileInfoToWrite.containsKey(name);
+  }
+
+  @Override
+  public ByteBuffer getUncompressedBlockDataToWrite() throws IOException {
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream(context.getBlockSize());
+    HFileProtos.InfoProto.Builder builder =
+        HFileProtos.InfoProto.newBuilder();
+    for (Map.Entry<String, byte[]> e : fileInfoToWrite.entrySet()) {
+      HFileProtos.BytesBytesPair bbp = HFileProtos.BytesBytesPair
+          .newBuilder()
+          .setFirst(ByteString.copyFrom(getUTF8Bytes(e.getKey())))
+          .setSecond(ByteString.copyFrom(e.getValue()))
+          .build();
+      builder.addMapEntry(bbp);
+    }
+    outputStream.write(PB_MAGIC);
+    byte[] payload = builder.build().toByteArray();
+    try {
+      outputStream.write(getVariableLengthEncodedBytes(payload.length));
+    } catch (IOException e) {
+      throw new RuntimeException("Failed to calculate File Info variable length");
+    }
+    outputStream.write(payload);
+    return ByteBuffer.wrap(outputStream.toByteArray());
   }
 }

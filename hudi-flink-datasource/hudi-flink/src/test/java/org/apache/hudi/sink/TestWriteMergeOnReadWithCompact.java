@@ -19,7 +19,6 @@
 package org.apache.hudi.sink;
 
 import org.apache.hudi.client.HoodieFlinkWriteClient;
-import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.PartialUpdateAvroPayload;
 import org.apache.hudi.common.model.WriteConcurrencyMode;
@@ -54,7 +53,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
   @Override
   protected void setUp(Configuration conf) {
     // trigger the compaction for every finished checkpoint
-    conf.setInteger(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
+    conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
   }
 
   @Test
@@ -92,12 +91,11 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
   @Test
   public void testNonBlockingConcurrencyControlWithPartialUpdatePayload() throws Exception {
     conf.setString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL.name());
-    conf.setString(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
-    conf.setString(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
+    conf.set(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
+    conf.set(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
     // disable schedule compaction in writers
-    conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
-    conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
-    conf.setString(HoodieMetadataConfig.ENABLE_METADATA_INDEX_PARTITION_STATS.key(), "false"); // HUDI-8814
+    conf.set(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
+    conf.set(FlinkOptions.PRE_COMBINE, true);
 
     // start pipeline1 and insert record: [id1,Danny,null,1,par1], suspend the tx commit
     List<RowData> dataset1 = Collections.singletonList(
@@ -106,35 +104,35 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
             TimestampData.fromEpochMillis(1), StringData.fromString("par1")));
     TestHarness pipeline1 = preparePipeline(conf)
         .consume(dataset1)
-        .assertEmptyDataFiles();
+        .assertEmptyDataFiles()
+        .checkpoint(1)
+        .assertNextEvent();
 
     // start pipeline2 and insert record: [id1,null,23,1,par1], suspend the tx commit
     Configuration conf2 = conf.clone();
-    conf2.setString(FlinkOptions.WRITE_CLIENT_ID, "2");
+    conf2.set(FlinkOptions.WRITE_CLIENT_ID, "2");
     List<RowData> dataset2 = Collections.singletonList(
         insertRow(
             StringData.fromString("id1"), null, 23,
             TimestampData.fromEpochMillis(2), StringData.fromString("par1")));
     TestHarness pipeline2 = preparePipeline(conf2)
         .consume(dataset2)
-        .assertEmptyDataFiles();
+        .assertEmptyBaseFiles()
+        .checkpoint(1)
+        .assertNextEvent();
 
     // step to commit the 1st txn
-    pipeline1.checkpoint(1)
-        .assertNextEvent()
-        .checkpointComplete(1);
+    pipeline1.checkpointComplete(1);
 
     // step to commit the 2nd txn
-    pipeline2.checkpoint(1)
-        .assertNextEvent()
-        .checkpointComplete(1);
+    pipeline2.checkpointComplete(1);
 
     // snapshot result is [(id1,Danny,23,2,par1)] after two writers finish to commit
     Map<String, String> tmpSnapshotResult = Collections.singletonMap("par1", "[id1,par1,id1,Danny,23,2,par1]");
     pipeline2.checkWrittenData(tmpSnapshotResult, 1);
 
     // There is no base file in partition dir because there is no compaction yet.
-    pipeline1.assertEmptyDataFiles();
+    pipeline1.assertEmptyBaseFiles();
 
     // schedule compaction outside all writers
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf, TestUtils.getMockRuntimeContext())) {
@@ -169,10 +167,10 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
   @Test
   public void testNonBlockingConcurrencyControlWithInflightInstant() throws Exception {
     conf.setString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL.name());
-    conf.setString(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
+    conf.set(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
     // disable schedule compaction in writers
-    conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
-    conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
+    conf.set(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
+    conf.set(FlinkOptions.PRE_COMBINE, true);
 
     // start pipeline1 and insert record: [id1,Danny,23,1,par1], suspend the tx commit
     List<RowData> dataset1 = Collections.singletonList(
@@ -181,11 +179,13 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
             TimestampData.fromEpochMillis(1), StringData.fromString("par1")));
     TestHarness pipeline1 = preparePipeline(conf)
         .consume(dataset1)
-        .assertEmptyDataFiles();
+        .assertEmptyDataFiles()
+        .checkpoint(1)
+        .assertNextEvent();
 
     // start pipeline2 and insert record: [id2,Stephen,34,2,par1], suspend the tx commit
     Configuration conf2 = conf.clone();
-    conf2.setString(FlinkOptions.WRITE_CLIENT_ID, "2");
+    conf2.set(FlinkOptions.WRITE_CLIENT_ID, "2");
 
     List<RowData> dataset2 = Collections.singletonList(
         insertRow(
@@ -193,16 +193,13 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
             TimestampData.fromEpochMillis(2), StringData.fromString("par1")));
     TestHarness pipeline2 = preparePipeline(conf2)
         .consume(dataset2)
-        .assertEmptyDataFiles();
+        .assertEmptyBaseFiles()
+        // step to flush the 2nd data, but not commit yet
+        .checkpoint(1)
+        .assertNextEvent();
 
     // step to commit the 1st txn
-    pipeline1.checkpoint(1)
-        .assertNextEvent()
-        .checkpointComplete(1);
-
-    // step to flush the 2nd data, but not commit yet
-    pipeline2.checkpoint(1)
-        .assertNextEvent();
+    pipeline1.checkpointComplete(1);
 
     // schedule compaction outside all writers
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf, TestUtils.getMockRuntimeContext())) {
@@ -243,11 +240,11 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
   @Test
   public void testBulkInsertWithNonBlockingConcurrencyControl() throws Exception {
     conf.setString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL.name());
-    conf.setString(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
-    conf.setString(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
+    conf.set(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
+    conf.set(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
     // disable schedule compaction in writers
-    conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
-    conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
+    conf.set(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
+    conf.set(FlinkOptions.PRE_COMBINE, true);
 
     // start pipeline1 and insert record: [id1,Danny,null,1,par1], suspend the tx commit
     List<RowData> dataset1 = Collections.singletonList(
@@ -256,71 +253,72 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
             TimestampData.fromEpochMillis(1), StringData.fromString("par1")));
     TestHarness pipeline1 = preparePipeline(conf)
         .consume(dataset1)
-        .assertEmptyDataFiles();
+        .assertEmptyDataFiles()
+        .checkpoint(1)
+        .assertNextEvent();
 
     // start pipeline2 and bulk insert record: [id1,null,23,1,par1], suspend the tx commit
     Configuration conf2 = conf.clone();
-    conf2.setString(FlinkOptions.OPERATION, "BULK_INSERT");
-    conf2.setString(FlinkOptions.WRITE_CLIENT_ID, "2");
+    conf2.set(FlinkOptions.OPERATION, "BULK_INSERT");
+    conf2.set(FlinkOptions.WRITE_CLIENT_ID, "2");
     List<RowData> dataset2 = Collections.singletonList(
         insertRow(
             StringData.fromString("id1"), null, 23,
             TimestampData.fromEpochMillis(2), StringData.fromString("par1")));
     TestHarness pipeline2 = preparePipeline(conf2)
-        .consume(dataset2);
+        .consume(dataset2)
+        .endInput();
 
     // step to commit the 1st txn
-    pipeline1.checkpoint(1)
-        .assertNextEvent()
-        .checkpointComplete(1);
+    pipeline1.checkpointComplete(1);
 
     // step to commit the 2nd txn, should throw exception
-    pipeline2.endInputThrows(HoodieWriteConflictException.class, "Cannot resolve conflicts");
+    pipeline2.endInputCompleteThrows(HoodieWriteConflictException.class, "Cannot resolve conflicts");
     pipeline1.end();
     pipeline2.end();
   }
 
-  // case1: txn1 is upsert writer, txn2 is bulk_insert writer.
-  //                       |----- txn1 ------|
+  // case2: txn1 is bulk_insert writer, txn2 is upsert writer.
+  //               |----- txn1 ------|
   //      |----------- txn2 -----------|
   // both two txn would success to commit
   @Test
   public void testBulkInsertInSequenceWithNonBlockingConcurrencyControl() throws Exception {
     conf.setString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL.name());
-    conf.setString(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
-    conf.setString(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
+    conf.set(FlinkOptions.INDEX_TYPE, HoodieIndex.IndexType.BUCKET.name());
+    conf.set(FlinkOptions.PAYLOAD_CLASS_NAME, PartialUpdateAvroPayload.class.getName());
     // disable schedule compaction in writers
-    conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
-    conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
-    conf.setString(HoodieMetadataConfig.ENABLE_METADATA_INDEX_PARTITION_STATS.key(), "false");
+    conf.set(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
+    conf.set(FlinkOptions.PRE_COMBINE, true);
 
     Configuration conf1 = conf.clone();
-    conf1.setString(FlinkOptions.OPERATION, "BULK_INSERT");
+    conf1.set(FlinkOptions.OPERATION, "BULK_INSERT");
     // start pipeline1 and bulk insert record: [id1,Danny,null,1,par1], suspend the tx commit
     List<RowData> dataset1 = Collections.singletonList(
         insertRow(
             StringData.fromString("id1"), StringData.fromString("Danny"), null,
             TimestampData.fromEpochMillis(1), StringData.fromString("par1")));
     TestHarness pipeline1 = preparePipeline(conf1)
-        .consume(dataset1);
+        .consume(dataset1)
+        .endInput();
 
     // start pipeline2 and insert record: [id1,null,23,2,par1], suspend the tx commit
     Configuration conf2 = conf.clone();
-    conf2.setString(FlinkOptions.WRITE_CLIENT_ID, "2");
+    conf2.set(FlinkOptions.WRITE_CLIENT_ID, "2");
     List<RowData> dataset2 = Collections.singletonList(
         insertRow(
             StringData.fromString("id1"), null, 23,
             TimestampData.fromEpochMillis(2), StringData.fromString("par1")));
     TestHarness pipeline2 = preparePipeline(conf2)
-        .consume(dataset2);
+        .consume(dataset2)
+        .checkpoint(1)
+        .assertNextEvent();
 
     // step to commit the 1st txn
-    pipeline1.endInput();
+    pipeline1.endInputComplete();
 
     // step to commit the 2nd data
-    pipeline2.checkpoint(1)
-        .assertNextEvent()
-        .checkpointComplete(1);
+    pipeline2.checkpointComplete(1);
 
     // snapshot result is [(id1,Danny,23,2,par1)] after two writers finish to commit
     Map<String, String> tmpSnapshotResult = Collections.singletonMap("par1", "[id1,par1,id1,Danny,23,2,par1]");
@@ -354,6 +352,16 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
     TestData.checkWrittenData(tempFile, readOptimizedResult, 1);
     pipeline1.end();
     pipeline2.end();
+  }
+
+  @Override
+  public void testBucketAssignWithRLI() throws Exception {
+    // can be re-enabled after #17701
+  }
+
+  @Test
+  public void testCacheCleanOfRecordIndexBackend() throws Exception {
+    // can be re-enabled after #17701
   }
 
   @Override

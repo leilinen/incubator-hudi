@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hudi.command.procedures
 
-import org.apache.hudi.{AvroConversionUtils, ColumnStatsIndexSupport}
+import org.apache.hudi.{ColumnStatsIndexSupport, HoodieSchemaConversionUtils}
 import org.apache.hudi.avro.model._
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.common.config.HoodieMetadataConfig
@@ -25,10 +25,8 @@ import org.apache.hudi.common.data.HoodieData
 import org.apache.hudi.common.engine.HoodieEngineContext
 import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.TableSchemaResolver
-import org.apache.hudi.common.table.timeline.HoodieInstant
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView
 import org.apache.hudi.exception.HoodieException
-import org.apache.hudi.metadata.HoodieTableMetadata
 
 import org.apache.avro.generic.IndexedRecord
 import org.apache.spark.internal.Logging
@@ -43,9 +41,11 @@ import scala.collection.mutable
 
 class ShowMetadataTableColumnStatsProcedure extends BaseProcedure with ProcedureBuilder with Logging {
   private val PARAMETERS = Array[ProcedureParameter](
-    ProcedureParameter.required(0, "table", DataTypes.StringType),
-    ProcedureParameter.optional(1, "partition", DataTypes.StringType),
-    ProcedureParameter.optional(2, "targetColumns", DataTypes.StringType)
+    ProcedureParameter.optional(0, "table", DataTypes.StringType),
+    ProcedureParameter.optional(1, "path", DataTypes.StringType),
+    ProcedureParameter.optional(2, "partition", DataTypes.StringType),
+    ProcedureParameter.optional(3, "targetColumns", DataTypes.StringType),
+    ProcedureParameter.optional(4, "filter", DataTypes.StringType, "")
   )
 
   private val OUTPUT_TYPE = new StructType(Array[StructField](
@@ -64,25 +64,30 @@ class ShowMetadataTableColumnStatsProcedure extends BaseProcedure with Procedure
     super.checkArgs(PARAMETERS, args)
 
     val table = getArgValueOrDefault(args, PARAMETERS(0))
-    val partitions = getArgValueOrDefault(args, PARAMETERS(1)).getOrElse("").toString
+    val path = getArgValueOrDefault(args, PARAMETERS(1))
+    val partitions = getArgValueOrDefault(args, PARAMETERS(2)).getOrElse("").toString
     val partitionsSeq = partitions.split(",").filter(_.nonEmpty).toSeq
 
-    val targetColumns = getArgValueOrDefault(args, PARAMETERS(2)).getOrElse("").toString
+    val targetColumns = getArgValueOrDefault(args, PARAMETERS(3)).getOrElse("").toString
     val targetColumnsSeq = targetColumns.split(",").toSeq
-    val basePath = getBasePath(table)
+    val filter = getArgValueOrDefault(args, PARAMETERS(4)).get.asInstanceOf[String]
+
+    validateFilter(filter, outputType)
+    val basePath = getBasePath(table, path)
     val metadataConfig = HoodieMetadataConfig.newBuilder
       .enable(true)
       .build
     val metaClient = createMetaClient(jsc, basePath)
     val schemaUtil = new TableSchemaResolver(metaClient)
-    val schema = AvroConversionUtils.convertAvroSchemaToStructType(schemaUtil.getTableAvroSchema)
-    val columnStatsIndex = new ColumnStatsIndexSupport(spark, schema, metadataConfig, metaClient)
+    val hoodieSchema = schemaUtil.getTableSchema
+    val structSchema = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(hoodieSchema)
+    val columnStatsIndex = new ColumnStatsIndexSupport(spark, structSchema, hoodieSchema, metadataConfig, metaClient)
     val colStatsRecords: HoodieData[HoodieMetadataColumnStats] = columnStatsIndex.loadColumnStatsIndexRecords(targetColumnsSeq, shouldReadInMemory = false)
     val engineCtx = new HoodieSparkEngineContext(jsc)
     val fsView = buildFileSystemView(table, engineCtx)
     val allFileSlices: Set[FileSlice] = {
       if (partitionsSeq.isEmpty) {
-        val metaTable = HoodieTableMetadata.create(engineCtx, metaClient.getStorage, metadataConfig, basePath)
+        val metaTable = metaClient.getTableFormat.getMetadataFactory.create(engineCtx, metaClient.getStorage, metadataConfig, basePath)
         metaTable.getAllPartitionPaths
           .asScala
           .flatMap(path => fsView.getLatestFileSlices(path).iterator().asScala)
@@ -104,7 +109,8 @@ class ShowMetadataTableColumnStatsProcedure extends BaseProcedure with Procedure
           getColumnStatsValue(c.getMaxValue), c.getNullCount.longValue())
       }
 
-    rows.toList.sortBy(r => r.getString(1))
+    val results = rows.toList.sortBy(r => r.getString(1))
+    applyFilter(results, filter, outputType)
   }
 
   private def getColumnStatsValue(stats_value: Any): String = {
@@ -136,14 +142,7 @@ class ShowMetadataTableColumnStatsProcedure extends BaseProcedure with Procedure
     val metaClient = createMetaClient(jsc, basePath)
 
     val timeline = metaClient.getActiveTimeline.getCommitsTimeline.filterCompletedInstants()
-
-    val maxInstant = metaClient.createNewInstantTime()
-    val instants = timeline.getInstants.iterator().asScala.filter(_.requestedTime < maxInstant)
-
-    val filteredTimeline = metaClient.getTimelineLayout.getTimelineFactory.createDefaultTimeline(
-      new java.util.ArrayList[HoodieInstant](instants.toList.asJava).stream(), metaClient.getActiveTimeline.getInstantReader)
-
-    HoodieTableFileSystemView.fileListingBasedFileSystemView(engineContext, metaClient, filteredTimeline)
+    HoodieTableFileSystemView.fileListingBasedFileSystemView(engineContext, metaClient, timeline)
   }
 
   override def build: Procedure = new ShowMetadataTableColumnStatsProcedure()
@@ -152,8 +151,6 @@ class ShowMetadataTableColumnStatsProcedure extends BaseProcedure with Procedure
 object ShowMetadataTableColumnStatsProcedure {
   val NAME = "show_metadata_table_column_stats"
 
-  def builder: Supplier[ProcedureBuilder] = new Supplier[ProcedureBuilder] {
-    override def get() = new ShowMetadataTableColumnStatsProcedure()
-  }
+  def builder: Supplier[ProcedureBuilder] = () => new ShowMetadataTableColumnStatsProcedure()
 }
 

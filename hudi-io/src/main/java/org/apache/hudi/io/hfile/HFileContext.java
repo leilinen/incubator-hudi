@@ -20,27 +20,33 @@
 package org.apache.hudi.io.hfile;
 
 import org.apache.hudi.io.compress.CompressionCodec;
-import org.apache.hudi.io.compress.HoodieDecompressor;
-import org.apache.hudi.io.compress.HoodieDecompressorFactory;
+import org.apache.hudi.io.compress.HoodieCompressor;
+import org.apache.hudi.io.compress.HoodieCompressorFactory;
+
+import lombok.AccessLevel;
+import lombok.Getter;
 
 /**
  * The context of HFile that contains information of the blocks.
  */
+@Getter(AccessLevel.PACKAGE)
 public class HFileContext {
+
   private final CompressionCodec compressionCodec;
-  private final HoodieDecompressor decompressor;
+  private final HoodieCompressor compressor;
+  private final ChecksumType checksumType;
+  private final int blockSize;
+  private final long fileCreationTime;
 
-  private HFileContext(CompressionCodec compressionCodec) {
+  private HFileContext(CompressionCodec compressionCodec,
+                       int blockSize,
+                       ChecksumType checksumType,
+                       long fileCreationTime) {
     this.compressionCodec = compressionCodec;
-    this.decompressor = HoodieDecompressorFactory.getDecompressor(compressionCodec);
-  }
-
-  CompressionCodec getCompressionCodec() {
-    return compressionCodec;
-  }
-
-  HoodieDecompressor getDecompressor() {
-    return decompressor;
+    this.compressor = HoodieCompressorFactory.getCompressor(compressionCodec);
+    this.blockSize = blockSize;
+    this.checksumType = checksumType;
+    this.fileCreationTime = fileCreationTime;
   }
 
   public static Builder builder() {
@@ -49,8 +55,13 @@ public class HFileContext {
 
   public static class Builder {
     private CompressionCodec compressionCodec = CompressionCodec.NONE;
+    private int blockSize = 1024 * 1024;
+    private ChecksumType checksumType = ChecksumType.NULL;
+    private long fileCreationTime = System.currentTimeMillis();
 
-    public Builder() {
+    public Builder blockSize(int blockSize) {
+      this.blockSize = blockSize;
+      return this;
     }
 
     public Builder compressionCodec(CompressionCodec compressionCodec) {
@@ -58,8 +69,18 @@ public class HFileContext {
       return this;
     }
 
+    public Builder checksumType(ChecksumType checksumType) {
+      this.checksumType = checksumType;
+      return this;
+    }
+
+    public Builder fileCreationTime(long fileCreationTime) {
+      this.fileCreationTime = fileCreationTime;
+      return this;
+    }
+
     public HFileContext build() {
-      return new HFileContext(compressionCodec);
+      return new HFileContext(compressionCodec, blockSize, checksumType, fileCreationTime);
     }
   }
 }

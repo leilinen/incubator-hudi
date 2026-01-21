@@ -20,12 +20,17 @@ package org.apache.hudi.util;
 
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.data.binary.BinaryStringData;
+import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.TimestampType;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.function.Function;
@@ -64,7 +69,7 @@ public class RowDataUtils {
       case SMALLINT:
         return fieldVal -> ((Short) fieldVal).intValue();
       case DATE:
-        return fieldVal -> LocalDate.ofEpochDay((Long) fieldVal);
+        return fieldVal -> (Integer) fieldVal;
       case CHAR:
       case VARCHAR:
         return Object::toString;
@@ -86,7 +91,7 @@ public class RowDataUtils {
       case TIMESTAMP_WITHOUT_TIME_ZONE:
         int precision2 = precision(logicalType);
         if (precision2 <= 3) {
-          return fieldVal -> utcTimezone ? ((TimestampData) fieldVal).toInstant().toEpochMilli() : ((TimestampData) fieldVal).toTimestamp().getTime();
+          return fieldVal -> utcTimezone ? ((TimestampData) fieldVal).getMillisecond() : ((TimestampData) fieldVal).toTimestamp().getTime();
         } else if (precision2 <= 6) {
           return fieldVal -> {
             Instant instant = utcTimezone ? ((TimestampData) fieldVal).toInstant() : ((TimestampData) fieldVal).toTimestamp().toInstant();
@@ -100,6 +105,104 @@ public class RowDataUtils {
       default:
         return fieldVal -> fieldVal;
     }
+  }
+
+  /**
+   * Resolve the flink type data object from given native java value.
+   *
+   * @param logicalType The logical type
+   * @param utcTimezone whether to use UTC timezone for timestamp data type
+   * @return A converter that converts a given native Java value into Flink value.
+   */
+  public static Function<Comparable, Comparable> flinkValFunc(LogicalType logicalType, boolean utcTimezone) {
+    switch (logicalType.getTypeRoot()) {
+      case NULL:
+        return fieldVal -> null;
+      case TINYINT:
+        return fieldVal -> (byte) fieldVal;
+      case SMALLINT:
+        return fieldVal -> (short) fieldVal;
+      case DATE:
+        return fieldVal -> {
+          if (fieldVal instanceof LocalDate) {
+            return (int) ((LocalDate) fieldVal).toEpochDay();
+          } else {
+            return (int) fieldVal;
+          }
+        };
+      case CHAR:
+      case VARCHAR:
+        return fieldVal -> BinaryStringData.fromString((String) fieldVal);
+      case BINARY:
+      case VARBINARY:
+        // note: byte[] is not Comparable
+        return fieldVal -> (ByteBuffer) fieldVal;
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+        int precision1 = precision(logicalType);
+        if (precision1 <= 3) {
+          return fieldVal -> TimestampData.fromEpochMillis((long) fieldVal);
+        } else if (precision1 <= 6) {
+          return fieldVal -> {
+            long microSecs = (long) fieldVal;
+            return TimestampData.fromInstant(Instant.ofEpochSecond(microSecs / 1_000_000, (microSecs % 1_000_000) * 1_000));
+          };
+        } else {
+          throw new UnsupportedOperationException("Unsupported timestamp precision: " + precision1);
+        }
+      case TIMESTAMP_WITHOUT_TIME_ZONE:
+        int precision2 = precision(logicalType);
+        if (precision2 <= 3) {
+          return fieldVal -> utcTimezone ? TimestampData.fromEpochMillis((long) fieldVal) : TimestampData.fromTimestamp(new Timestamp((long) fieldVal));
+        } else if (precision2 <= 6) {
+          return fieldVal -> {
+            long microSecs = (long) fieldVal;
+            if (utcTimezone) {
+              return TimestampData.fromInstant(Instant.ofEpochSecond(microSecs / 1_000_000, (microSecs % 1_000_000) * 1_000));
+            } else {
+              Timestamp timestamp = new Timestamp(microSecs / 1_000);
+              timestamp.setNanos((int) ((microSecs % 1_000_000) * 1_000));
+              return TimestampData.fromTimestamp(timestamp);
+            }
+          };
+        } else {
+          throw new UnsupportedOperationException("Unsupported timestamp precision: " + precision2);
+        }
+      case DECIMAL:
+        DecimalType decimalType = (DecimalType) logicalType;
+        return fieldVal -> DecimalData.fromBigDecimal((BigDecimal) fieldVal, decimalType.getPrecision(), decimalType.getScale());
+      default:
+        return fieldVal -> fieldVal;
+    }
+  }
+
+  /**
+   * Convert the native Java object to the corresponding value of Flink type.
+   *
+   * @param value Java object
+   *
+   * @return Value of Flink type
+   */
+  public static Object convertValueToFlinkType(Object value) {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof String) {
+      return StringData.fromString((String) value);
+    }
+    if (value instanceof BigDecimal) {
+      BigDecimal decimalVal = (BigDecimal) value;
+      return DecimalData.fromBigDecimal(decimalVal, decimalVal.precision(), decimalVal.scale());
+    }
+    if (value instanceof Timestamp) {
+      return TimestampData.fromTimestamp((Timestamp) value);
+    }
+    if (value instanceof LocalDate) {
+      return (int)(((LocalDate) value).toEpochDay());
+    }
+    if (value instanceof ByteBuffer) {
+      return ((ByteBuffer) value).array();
+    }
+    return value;
   }
 
   /**

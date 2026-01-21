@@ -31,11 +31,12 @@ import org.apache.hudi.common.model.HoodieAvroRecordMerger;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.TableFileSystemView;
-import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.HoodieRecordUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.TypeUtils;
@@ -44,16 +45,16 @@ import org.apache.hudi.common.util.collection.CloseableMappingIterator;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.io.storage.HoodieAvroFileReader;
 import org.apache.hudi.io.storage.HoodieIOFactory;
+import org.apache.hudi.io.util.FileIOUtils;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.sql.SparkSession;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.spark.sql.SQLContext;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -77,9 +78,8 @@ import static org.apache.hudi.common.util.ConfigUtils.DEFAULT_HUDI_CONFIG_FOR_RE
 /**
  * This class helps to generate updates from an already existing hoodie dataset. It supports generating updates in across partitions, files and records.
  */
+@Slf4j
 public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
-
-  private static Logger log = LoggerFactory.getLogger(DFSHoodieDatasetInputReader.class);
 
   private transient JavaSparkContext jsc;
   private String schemaStr;
@@ -97,8 +97,7 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
     // Using FSUtils.getFS here instead of metaClient.getFS() since we don't want to count these listStatus
     // calls in metrics as they are not part of normal HUDI operation.
     HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
-    List<String> partitionPaths = FSUtils.getAllPartitionPaths(engineContext, metaClient.getStorage(), metaClient.getBasePath(),
-        HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FOR_READERS);
+    List<String> partitionPaths = FSUtils.getAllPartitionPaths(engineContext, metaClient, HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FOR_READERS);
     // Sort partition so we can pick last N partitions by default
     Collections.sort(partitionPaths);
     if (!partitionPaths.isEmpty()) {
@@ -125,10 +124,10 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
   @Override
   protected long analyzeSingleFile(String filePath) {
     if (filePath.endsWith(HoodieFileFormat.PARQUET.getFileExtension())) {
-      return SparkBasedReader.readParquet(new SparkSession(jsc.sc()), Arrays.asList(filePath),
+      return SparkBasedReader.readParquet(SQLContext.getOrCreate(jsc.sc()), Arrays.asList(filePath),
           Option.empty(), Option.empty()).count();
     } else if (filePath.endsWith(HoodieFileFormat.ORC.getFileExtension())) {
-      return SparkBasedReader.readOrc(new SparkSession(jsc.sc()), Arrays.asList(filePath),
+      return SparkBasedReader.readOrc(SQLContext.getOrCreate(jsc.sc()), Arrays.asList(filePath),
           Option.empty(), Option.empty()).count();
     }
     throw new UnsupportedOperationException("Format for " + filePath + " is not supported yet.");
@@ -273,7 +272,7 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
   private Iterator<IndexedRecord> readColumnarOrLogFiles(FileSlice fileSlice) throws IOException {
     if (fileSlice.getBaseFile().isPresent()) {
       // Read the base files using the latest writer schema.
-      Schema schema = HoodieAvroUtils.addMetadataFields(new Schema.Parser().parse(schemaStr));
+      HoodieSchema schema = HoodieSchemaUtils.addMetadataFields(new HoodieSchema.Parser().parse(schemaStr));
       HoodieAvroFileReader reader = TypeUtils.unsafeCast(HoodieIOFactory.getIOFactory(metaClient.getStorage())
           .getReaderFactory(HoodieRecordType.AVRO)
           .getFileReader(
@@ -288,7 +287,7 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
           .withLogFilePaths(
               fileSlice.getLogFiles().map(l -> l.getPath().getName())
                   .collect(Collectors.toList()))
-          .withReaderSchema(new Schema.Parser().parse(schemaStr))
+          .withReaderSchema(HoodieSchema.parse(schemaStr))
           .withLatestInstantTime(metaClient.getActiveTimeline().getCommitsTimeline()
               .filterCompletedInstants().lastInstant().get().requestedTime())
           .withMaxMemorySizeInBytes(

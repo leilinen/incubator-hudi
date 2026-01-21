@@ -20,6 +20,7 @@
 
 package org.apache.hudi.index.bloom;
 
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.functional.TestHoodieMetadataBase;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
@@ -27,6 +28,7 @@ import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieIndexConfig;
@@ -38,7 +40,6 @@ import org.apache.hudi.keygen.SimpleKeyGenerator;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 import org.apache.hudi.table.HoodieSparkTable;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.api.java.JavaRDD;
@@ -46,15 +47,17 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Properties;
 
+import static org.apache.hudi.common.table.timeline.HoodieTimeline.COMMIT_ACTION;
 import static org.apache.hudi.common.testutils.SchemaTestUtil.getSchemaFromResource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class TestBloomIndexTagWithColStats extends TestHoodieMetadataBase {
 
-  private static final Schema SCHEMA = getSchemaFromResource(TestBloomIndexTagWithColStats.class, "/exampleSchema.avsc", true);
+  private static final HoodieSchema SCHEMA = getSchemaFromResource(TestBloomIndexTagWithColStats.class, "/exampleSchema.avsc", true);
 
   @AfterEach
   public void tearDown() throws Exception {
@@ -150,8 +153,9 @@ public class TestBloomIndexTagWithColStats extends TestHoodieMetadataBase {
     // Should not find any files
     assertFalse(taggedRecordRDD.first().isCurrentLocationKnown());
 
-    writeClient.startCommitWithTime("001");
+    WriteClientTestUtils.startCommitWithTime(writeClient, "001");
     JavaRDD<WriteStatus> status = writeClient.upsert(taggedRecordRDD, "001");
+    writeClient.commit("001", status, Option.empty(), COMMIT_ACTION, Collections.emptyMap(), Option.empty());
     String fileId = status.first().getFileId();
 
     metaClient = HoodieTableMetaClient.reload(metaClient);
@@ -161,7 +165,7 @@ public class TestBloomIndexTagWithColStats extends TestHoodieMetadataBase {
   }
 
   private GenericRecord generateGenericRecord(String rowKey, String time, int number) {
-    GenericRecord rec = new GenericData.Record(SCHEMA);
+    GenericRecord rec = new GenericData.Record(SCHEMA.toAvroSchema());
     rec.put("_row_key", rowKey);
     rec.put("time", time);
     rec.put("number", number);

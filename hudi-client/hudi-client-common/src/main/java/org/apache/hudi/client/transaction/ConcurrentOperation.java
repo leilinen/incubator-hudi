@@ -26,9 +26,13 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.MetadataConversionUtils;
+import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
+
+import lombok.Getter;
+import lombok.ToString;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -50,20 +54,28 @@ import static org.apache.hudi.common.util.CommitUtils.getPartitionAndFileIdWitho
  * Since we interchange payload types between AVRO specific records and POJO's, this object serves as
  * a common payload to manage these conversions.
  */
+@ToString(onlyExplicitlyIncluded = true)
 public class ConcurrentOperation {
 
+  @Getter
   private WriteOperationType operationType;
   private final HoodieMetadataWrapper metadataWrapper;
+  @Getter
   private final Option<HoodieCommitMetadata> commitMetadataOption;
+  @ToString.Include
   private final String actionState;
+  @ToString.Include
   private final String actionType;
+  @ToString.Include
   private final String instantTime;
+  @Getter
   private Set<Pair<String, String>> mutatedPartitionAndFileIds = Collections.emptySet();
 
   public ConcurrentOperation(HoodieInstant instant, HoodieTableMetaClient metaClient) throws IOException {
-    // Replace compaction.inflight to compaction.request since inflight does not contain compaction plan.
-    if (instant.getAction().equals(COMPACTION_ACTION) && instant.getState().equals(HoodieInstant.State.INFLIGHT)) {
-      instant = metaClient.createNewInstant(HoodieInstant.State.REQUESTED, COMPACTION_ACTION, instant.requestedTime());
+    // Replace inflight compaction and clustering to requested since inflight does not contain the plan.
+    if ((instant.getAction().equals(COMPACTION_ACTION) || ClusteringUtils.isClusteringInstant(metaClient.getActiveTimeline(), instant, metaClient.getInstantGenerator()))
+        && instant.getState().equals(HoodieInstant.State.INFLIGHT)) {
+      instant = metaClient.createNewInstant(HoodieInstant.State.REQUESTED, instant.getAction(), instant.requestedTime());
     }
     this.metadataWrapper = new HoodieMetadataWrapper(MetadataConversionUtils.createMetaWrapper(instant, metaClient));
     this.commitMetadataOption = Option.empty();
@@ -92,18 +104,6 @@ public class ConcurrentOperation {
 
   public String getInstantTimestamp() {
     return instantTime;
-  }
-
-  public WriteOperationType getOperationType() {
-    return operationType;
-  }
-
-  public Set<Pair<String, String>> getMutatedPartitionAndFileIds() {
-    return mutatedPartitionAndFileIds;
-  }
-
-  public Option<HoodieCommitMetadata> getCommitMetadataOption() {
-    return commitMetadataOption;
   }
 
   private void init(HoodieInstant instant) {
@@ -188,14 +188,5 @@ public class ConcurrentOperation {
         .flatMap(ig -> ig.getSlices().stream())
         .map(fileSlice -> Pair.of(fileSlice.getPartitionPath(), fileSlice.getFileId()))
         .collect(Collectors.toSet());
-  }
-
-  @Override
-  public String toString() {
-    return "{"
-        + "actionType=" + this.getInstantActionType()
-        + ", instantTime=" + this.getInstantTimestamp()
-        + ", actionState=" + this.getInstantActionState()
-        + '\'' + '}';
   }
 }

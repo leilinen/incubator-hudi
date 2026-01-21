@@ -19,6 +19,7 @@
 package org.apache.hudi.utilities.sources;
 
 import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
@@ -26,6 +27,7 @@ import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.checkpoint.Checkpoint;
 import org.apache.hudi.common.table.checkpoint.StreamerCheckpointV1;
@@ -55,7 +57,6 @@ import org.apache.hudi.utilities.streamer.SourceProfileSupplier;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.api.java.JavaRDD;
@@ -78,11 +79,13 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import static org.apache.hudi.common.table.timeline.HoodieTimeline.COMMIT_ACTION;
 import static org.apache.hudi.testutils.Assertions.assertNoWriteErrors;
 import static org.apache.hudi.utilities.sources.helpers.IncrSourceHelper.MissingCheckpointStrategy.READ_UPTO_LATEST_COMMIT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -95,8 +98,8 @@ import static org.mockito.Mockito.when;
 
 public class TestGcsEventsHoodieIncrSource extends SparkClientFunctionalTestHarness {
 
-  private static final Schema GCS_METADATA_SCHEMA = SchemaTestUtil.getSchemaFromResource(
-      TestGcsEventsHoodieIncrSource.class, "/streamer-config/gcs-metadata.avsc", true);
+  private static final HoodieSchema GCS_METADATA_SCHEMA = SchemaTestUtil.getSchemaFromResource(
+      TestGcsEventsHoodieIncrSource.class, "/streamer-config/gcs-metadata.avsc", false);
   private static final String IGNORE_FILE_EXTENSION = ".ignore";
 
   private ObjectMapper mapper = new ObjectMapper();
@@ -393,7 +396,7 @@ public class TestGcsEventsHoodieIncrSource extends SparkClientFunctionalTestHarn
         + "?generation=%s&alt=media", bucketName, filename, generation);
     String selfLink = String.format("https://www.googleapis.com/storage/v1/b/%s/o/%s", bucketName, filename);
 
-    GenericRecord rec = new GenericData.Record(GCS_METADATA_SCHEMA);
+    GenericRecord rec = new GenericData.Record(GCS_METADATA_SCHEMA.toAvroSchema());
     rec.put("_row_key", id);
     rec.put("partition_path", bucketName);
     rec.put("timestamp", Long.parseLong(commitTime));
@@ -434,18 +437,16 @@ public class TestGcsEventsHoodieIncrSource extends SparkClientFunctionalTestHarn
     HoodieWriteConfig writeConfig = getWriteConfig();
     try (SparkRDDWriteClient writeClient = getHoodieWriteClient(writeConfig)) {
 
-      writeClient.startCommitWithTime(commitTime);
+      WriteClientTestUtils.startCommitWithTime(writeClient, commitTime);
       List<HoodieRecord> gcsMetadataRecords = Arrays.asList(
           getGcsMetadataRecord(commitTime, "data-file-1.json", "bucket-1", "1"),
           getGcsMetadataRecord(commitTime, "data-file-2.json", "bucket-1", "1"),
           getGcsMetadataRecord(commitTime, "data-file-3.json", "bucket-1", "1"),
           getGcsMetadataRecord(commitTime, "data-file-4.json", "bucket-1", "1")
       );
-      JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(gcsMetadataRecords, 1), commitTime);
-
-      List<WriteStatus> statuses = result.collect();
-      assertNoWriteErrors(statuses);
-
+      List<WriteStatus> statusList = writeClient.upsert(jsc().parallelize(gcsMetadataRecords, 1), commitTime).collect();
+      writeClient.commit(commitTime, jsc.parallelize(statusList), Option.empty(), COMMIT_ACTION, Collections.emptyMap(), Option.empty());
+      assertNoWriteErrors(statusList);
       return Pair.of(commitTime, gcsMetadataRecords);
     }
   }

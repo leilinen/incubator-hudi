@@ -18,10 +18,11 @@
 
 package org.apache.hudi.integ;
 
-import org.apache.hadoop.hbase.TableExistsException;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.util.collection.Pair;
+
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Base class to run cmd and generate data in hive.
  */
+@Slf4j
 public class HoodieTestHiveBase extends ITTestBase {
 
   protected enum PartitionType {
@@ -67,7 +69,7 @@ public class HoodieTestHiveBase extends ITTestBase {
       // Ensure table does not exist
       stdOutErr = executeHiveCommand("show tables like '" + hiveTableName + "'");
       if (!stdOutErr.getLeft().isEmpty()) {
-        throw new TableExistsException("Dropped table " + hiveTableName + " exists!");
+        throw new IllegalStateException("Dropped table " + hiveTableName + " exists!");
       }
     }
 
@@ -113,7 +115,7 @@ public class HoodieTestHiveBase extends ITTestBase {
       properties.load(stream);
       return properties.getInteger("hoodie.hiveserver.time.wait", DEFAULT_TIME_WAIT);
     } catch (IOException e) {
-      LOG.warn("Can not load property file, use default time wait for hiveserver.");
+      log.warn("Can not load property file, use default time wait for hiveserver.");
       return DEFAULT_TIME_WAIT;
     }
   }

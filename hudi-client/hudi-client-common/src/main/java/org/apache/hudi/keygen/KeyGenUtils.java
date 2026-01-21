@@ -21,6 +21,9 @@ package org.apache.hudi.keygen;
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.table.HoodieTableVersion;
+import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.PartitionPathEncodeUtils;
 import org.apache.hudi.common.util.ReflectionUtils;
@@ -39,18 +42,20 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
+import static org.apache.hudi.config.HoodieWriteConfig.COMPLEX_KEYGEN_NEW_ENCODING;
+import static org.apache.hudi.config.HoodieWriteConfig.WRITE_TABLE_VERSION;
+import static org.apache.hudi.keygen.KeyGenerator.DEFAULT_COLUMN_VALUE_SEPARATOR;
+import static org.apache.hudi.keygen.KeyGenerator.DEFAULT_RECORD_KEY_PARTS_SEPARATOR;
+import static org.apache.hudi.keygen.KeyGenerator.EMPTY_RECORDKEY_PLACEHOLDER;
+import static org.apache.hudi.keygen.KeyGenerator.NULL_RECORDKEY_PLACEHOLDER;
+import static org.apache.hudi.keygen.KeyGenerator.constructRecordKey;
+
 public class KeyGenUtils {
-
-  protected static final String NULL_RECORDKEY_PLACEHOLDER = "__null__";
-  protected static final String EMPTY_RECORDKEY_PLACEHOLDER = "__empty__";
-
   protected static final String HUDI_DEFAULT_PARTITION_PATH = PartitionPathEncodeUtils.DEFAULT_PARTITION_PATH;
   public static final String DEFAULT_PARTITION_PATH_SEPARATOR = "/";
-  public static final String DEFAULT_RECORD_KEY_PARTS_SEPARATOR = ",";
-  public static final String DEFAULT_COLUMN_VALUE_SEPARATOR = ":";
-
   public static final String RECORD_KEY_GEN_PARTITION_ID_CONFIG = "_hoodie.record.key.gen.partition.id";
   public static final String RECORD_KEY_GEN_INSTANT_TIME_CONFIG = "_hoodie.record.key.gen.instant.time";
 
@@ -218,33 +223,14 @@ public class KeyGenUtils {
   }
 
   public static String getRecordKey(GenericRecord record, List<String> recordKeyFields, boolean consistentLogicalTimestampEnabled) {
-    boolean keyIsNullEmpty = true;
-    StringBuilder recordKey = new StringBuilder();
-    for (int i = 0; i < recordKeyFields.size(); i++) {
-      String recordKeyField = recordKeyFields.get(i);
-      String recordKeyValue;
+    BiFunction<String, Integer, String> valueFunction = (recordKeyField, index) -> {
       try {
-        recordKeyValue = HoodieAvroUtils.getNestedFieldValAsString(record, recordKeyField, false, consistentLogicalTimestampEnabled);
+        return HoodieAvroUtils.getNestedFieldValAsString(record, recordKeyField, false, consistentLogicalTimestampEnabled);
       } catch (HoodieException e) {
         throw new HoodieKeyException("Record key field '" + recordKeyField + "' does not exist in the input record");
       }
-      if (recordKeyValue == null) {
-        recordKey.append(recordKeyField).append(DEFAULT_COLUMN_VALUE_SEPARATOR).append(NULL_RECORDKEY_PLACEHOLDER);
-      } else if (recordKeyValue.isEmpty()) {
-        recordKey.append(recordKeyField).append(DEFAULT_COLUMN_VALUE_SEPARATOR).append(EMPTY_RECORDKEY_PLACEHOLDER);
-      } else {
-        recordKey.append(recordKeyField).append(DEFAULT_COLUMN_VALUE_SEPARATOR).append(recordKeyValue);
-        keyIsNullEmpty = false;
-      }
-      if (i != recordKeyFields.size() - 1) {
-        recordKey.append(DEFAULT_RECORD_KEY_PARTS_SEPARATOR);
-      }
-    }
-    if (keyIsNullEmpty) {
-      throw new HoodieKeyException("recordKey values: \"" + recordKey + "\" for fields: "
-          + recordKeyFields + " cannot be entirely null or empty.");
-    }
-    return recordKey.toString();
+    };
+    return constructRecordKey(recordKeyFields.toArray(new String[]{}), valueFunction);
   }
 
   public static String getRecordPartitionPath(GenericRecord record, List<String> partitionPathFields,
@@ -350,5 +336,35 @@ public class KeyGenUtils {
     return !props.containsKey(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key())
         || props.getProperty(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key()).equals(StringUtils.EMPTY_STRING);
     // spark-sql sets record key config to empty string for update, and couple of other statements.
+  }
+
+  public static boolean isComplexKeyGeneratorWithSingleRecordKeyField(HoodieTableConfig tableConfig) {
+    Option<String[]> recordKeyFields = tableConfig.getRecordKeyFields();
+    return KeyGeneratorType.isComplexKeyGenerator(tableConfig)
+        && recordKeyFields.isPresent() && recordKeyFields.get().length == 1;
+  }
+
+  public static String getComplexKeygenErrorMessage(String operation) {
+    return "This table uses the complex key generator with a single record "
+        + "key field. If the table is written with Hudi 0.14.1, 0.15.0, 1.0.0, 1.0.1, or 1.0.2 "
+        + "release before, the table may potentially contain duplicates due to a breaking "
+        + "change in the key encoding in the _hoodie_record_key meta field (HUDI-7001) which "
+        + "is crucial for upserts. Please take action based on the details on the deployment "
+        + "guide (https://hudi.apache.org/docs/deployment#complex-key-generator) "
+        + "before resuming the " + operation + " to the this table. If you're certain "
+        + "that the table is not affected by the key encoding change, set "
+        + "`hoodie.write.complex.keygen.validation.enable=false` to skip this validation.";
+  }
+
+  public static boolean encodeSingleKeyFieldNameForComplexKeyGen(TypedProperties props) {
+    int tableVersionCode = ConfigUtils.getIntWithAltKeys(props, WRITE_TABLE_VERSION);
+    HoodieTableVersion tableVersion = HoodieTableVersion.fromVersionCode(tableVersionCode);
+    return tableVersion.greaterThanOrEquals(HoodieTableVersion.NINE)
+        || !ConfigUtils.getBooleanWithAltKeys(props, COMPLEX_KEYGEN_NEW_ENCODING);
+  }
+
+  public static boolean mayUseNewEncodingForComplexKeyGen(HoodieTableConfig tableConfig) {
+    return tableConfig.getTableVersion().lesserThan(HoodieTableVersion.NINE)
+        && isComplexKeyGeneratorWithSingleRecordKeyField(tableConfig);
   }
 }

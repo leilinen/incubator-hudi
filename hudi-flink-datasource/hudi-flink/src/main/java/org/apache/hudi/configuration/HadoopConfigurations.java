@@ -50,8 +50,11 @@ public class HadoopConfigurations {
    */
   public static org.apache.hadoop.conf.Configuration getHadoopConf(Configuration conf) {
     org.apache.hadoop.conf.Configuration hadoopConf = FlinkClientUtil.getHadoopConf();
-    Map<String, String> options = FlinkOptions.getPropertiesWithPrefix(conf.toMap(), HADOOP_PREFIX);
-    options.forEach(hadoopConf::set);
+    Map<String, String> hadoopOptions = FlinkOptions.getPropertiesWithPrefix(conf.toMap(), HADOOP_PREFIX);
+    hadoopOptions.forEach(hadoopConf::set);
+    // kind of hacky: flink specific IO options.
+    Map<String, String> ioOptions = OptionsResolver.getIOOptions(conf);
+    ioOptions.forEach(hadoopConf::set);
     return hadoopConf;
   }
 
@@ -59,7 +62,7 @@ public class HadoopConfigurations {
    * Creates a Hive configuration with configured dir path or empty if no Hive conf dir is set.
    */
   public static org.apache.hadoop.conf.Configuration getHiveConf(Configuration conf) {
-    String explicitDir = conf.getString(FlinkOptions.HIVE_SYNC_CONF_DIR, System.getenv("HIVE_CONF_DIR"));
+    String explicitDir = conf.getString(FlinkOptions.HIVE_SYNC_CONF_DIR.key(), System.getenv("HIVE_CONF_DIR"));
     org.apache.hadoop.conf.Configuration hadoopConf = new org.apache.hadoop.conf.Configuration();
     if (explicitDir != null) {
       hadoopConf.addResource(new Path(explicitDir, "hive-site.xml"));

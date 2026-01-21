@@ -56,13 +56,12 @@ import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.commit.BaseCommitActionExecutor;
-import org.apache.hudi.table.action.commit.BaseSparkCommitActionExecutor;
+import org.apache.hudi.table.action.commit.SparkAutoCommitExecutor;
 import org.apache.hudi.table.action.commit.SparkBulkInsertCommitActionExecutor;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.api.java.JavaRDD;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -79,10 +78,9 @@ import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 import static org.apache.hudi.config.HoodieWriteConfig.WRITE_STATUS_STORAGE_LEVEL_VALUE;
 import static org.apache.hudi.table.action.bootstrap.MetadataBootstrapHandlerFactory.getMetadataHandler;
 
+@Slf4j
 public class SparkBootstrapCommitActionExecutor<T>
     extends BaseCommitActionExecutor<T, HoodieData<HoodieRecord<T>>, HoodieData<HoodieKey>, HoodieData<WriteStatus>, HoodieBootstrapWriteMetadata<HoodieData<WriteStatus>>> {
-
-  private static final Logger LOG = LoggerFactory.getLogger(SparkBootstrapCommitActionExecutor.class);
   protected String bootstrapSchema = null;
   private transient HoodieStorage bootstrapSourceStorage;
 
@@ -94,7 +92,6 @@ public class SparkBootstrapCommitActionExecutor<T>
         context,
         new HoodieWriteConfig.Builder()
             .withProps(config.getProps())
-            .withAutoCommit(true)
             .withWriteStatusClass(BootstrapWriteStatus.class)
             .withBulkInsertParallelism(config.getBootstrapParallelism()).build(),
         table,
@@ -177,7 +174,8 @@ public class SparkBootstrapCommitActionExecutor<T>
     HoodieData<WriteStatus> statuses = table.getIndex().updateLocation(writeStatuses, context, table);
     result.setIndexUpdateDuration(Duration.between(indexStartTime, Instant.now()));
     result.setWriteStatuses(statuses);
-    commitOnAutoCommit(result);
+    runPrecommitValidators(result);
+    completeCommit(result);
   }
 
   @Override
@@ -206,18 +204,18 @@ public class SparkBootstrapCommitActionExecutor<T>
     HoodieTableMetaClient metaClient = table.getMetaClient();
     try (BootstrapIndex.IndexWriter indexWriter = BootstrapIndex.getBootstrapIndex(metaClient)
         .createWriter(metaClient.getTableConfig().getBootstrapBasePath().get())) {
-      LOG.info("Starting to write bootstrap index for source " + config.getBootstrapSourceBasePath() + " in table "
+      log.info("Starting to write bootstrap index for source " + config.getBootstrapSourceBasePath() + " in table "
           + config.getBasePath());
       indexWriter.begin();
       bootstrapSourceAndStats.forEach((key, value) -> indexWriter.appendNextPartition(key,
           value.stream().map(Pair::getKey).collect(Collectors.toList())));
       indexWriter.finish();
-      LOG.info("Finished writing bootstrap index for source " + config.getBootstrapSourceBasePath() + " in table "
+      log.info("Finished writing bootstrap index for source " + config.getBootstrapSourceBasePath() + " in table "
           + config.getBasePath());
     }
     commit(result, bootstrapSourceAndStats.values().stream()
         .flatMap(f -> f.stream().map(Pair::getValue)).collect(Collectors.toList()));
-    LOG.info("Committing metadata bootstrap !!");
+    log.info("Committing metadata bootstrap !!");
   }
 
   @Override
@@ -248,8 +246,13 @@ public class SparkBootstrapCommitActionExecutor<T>
     table.getActiveTimeline().createNewInstant(requested);
 
     // Setup correct schema and run bulk insert.
+    HoodieWriteConfig writeConfig = new HoodieWriteConfig.Builder()
+        .withProps(config.getProps())
+        .withSchema(bootstrapSchema)
+        .build();
+
     Option<HoodieWriteMetadata<HoodieData<WriteStatus>>> writeMetadataOption =
-        Option.of(getBulkInsertActionExecutor(HoodieJavaRDD.of(inputRecordsRDD)).execute());
+        Option.of(doBulkInsertAndCommit(HoodieJavaRDD.of(inputRecordsRDD), writeConfig));
 
     // Delete the marker directory for the instant
     WriteMarkersFactory.get(config.getMarkersType(), table, bootstrapInstantTime)
@@ -258,10 +261,9 @@ public class SparkBootstrapCommitActionExecutor<T>
     return writeMetadataOption;
   }
 
-  protected BaseSparkCommitActionExecutor<T> getBulkInsertActionExecutor(HoodieData<HoodieRecord> inputRecordsRDD) {
-    return new SparkBulkInsertCommitActionExecutor((HoodieSparkEngineContext) context, new HoodieWriteConfig.Builder().withProps(config.getProps())
-        .withSchema(bootstrapSchema).build(), table, HoodieTimeline.FULL_BOOTSTRAP_INSTANT_TS,
-        inputRecordsRDD, Option.empty(), extraMetadata);
+  protected HoodieWriteMetadata<HoodieData<WriteStatus>> doBulkInsertAndCommit(HoodieData<HoodieRecord> inputRecordsRDD, HoodieWriteConfig writeConfig) {
+    return new SparkAutoCommitExecutor(new SparkBulkInsertCommitActionExecutor((HoodieSparkEngineContext) context, writeConfig, table, HoodieTimeline.FULL_BOOTSTRAP_INSTANT_TS,
+        inputRecordsRDD, Option.empty(), extraMetadata)).execute();
   }
 
   /**
@@ -273,10 +275,10 @@ public class SparkBootstrapCommitActionExecutor<T>
     List<Pair<String, List<HoodieFileStatus>>> folders = BootstrapUtils.getAllLeafFoldersWithFiles(
         table.getBaseFileFormat(), bootstrapSourceStorage, config.getBootstrapSourceBasePath(), context);
 
-    LOG.info("Fetching Bootstrap Schema !!");
+    log.info("Fetching Bootstrap Schema !!");
     HoodieBootstrapSchemaProvider sourceSchemaProvider = new HoodieSparkBootstrapSchemaProvider(config);
     bootstrapSchema = sourceSchemaProvider.getBootstrapSchema(context, folders).toString();
-    LOG.info("Bootstrap Schema :" + bootstrapSchema);
+    log.info("Bootstrap Schema :" + bootstrapSchema);
 
     BootstrapModeSelector selector =
         (BootstrapModeSelector) ReflectionUtils.loadClass(config.getBootstrapModeSelectorClass(), config);

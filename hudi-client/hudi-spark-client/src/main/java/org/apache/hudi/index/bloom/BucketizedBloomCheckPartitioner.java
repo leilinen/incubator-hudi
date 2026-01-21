@@ -21,9 +21,10 @@ package org.apache.hudi.index.bloom;
 import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.util.NumericUtils;
 
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.Partitioner;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -56,41 +57,61 @@ import scala.Tuple2;
  *   2) Spread buckets across partitions evenly to achieve skew reduction
  * </pre>
  */
+@Slf4j
 public class BucketizedBloomCheckPartitioner extends Partitioner {
 
-  private static final Logger LOG = LoggerFactory.getLogger(BucketizedBloomCheckPartitioner.class);
-
-  private int partitions;
+  private final int partitions;
 
   /**
    * Stores the final mapping of a file group to a list of partitions for its keys.
    */
+  @Getter(AccessLevel.PACKAGE)
   private Map<HoodieFileGroupId, List<Integer>> fileGroupToPartitions;
 
   /**
    * Create a partitioner that computes a plan based on provided workload characteristics.
    *
-   * @param targetPartitions maximum number of partitions to target
-   * @param fileGroupToComparisons number of expected comparisons per file group
-   * @param keysPerBucket maximum number of keys to pack in a single bucket
+   * @param configuredBloomIndexParallelism configured bloom index parallelism;
+   *                                        0 means not configured by the user
+   * @param inputParallelism                input parallelism
+   * @param fileGroupToComparisons          number of expected comparisons per file group
+   * @param keysPerBucket                   maximum number of keys to pack in a single bucket
+   * @param shouldUseDynamicParallelism     whether the parallelism should be determined
+   *                                        by the keys per bucket
    */
-  public BucketizedBloomCheckPartitioner(int targetPartitions, Map<HoodieFileGroupId, Long> fileGroupToComparisons,
-      int keysPerBucket) {
+  public BucketizedBloomCheckPartitioner(
+      int configuredBloomIndexParallelism,
+      int inputParallelism,
+      Map<HoodieFileGroupId, Long> fileGroupToComparisons,
+      int keysPerBucket,
+      boolean shouldUseDynamicParallelism) {
     this.fileGroupToPartitions = new HashMap<>();
 
     Map<HoodieFileGroupId, Integer> bucketsPerFileGroup = new HashMap<>();
     // Compute the buckets needed per file group, using simple uniform distribution
     fileGroupToComparisons.forEach((f, c) -> bucketsPerFileGroup.put(f, (int) Math.ceil((c * 1.0) / keysPerBucket)));
     int totalBuckets = bucketsPerFileGroup.values().stream().mapToInt(i -> i).sum();
-    // If totalBuckets > targetPartitions, no need to have extra partitions
-    this.partitions = Math.min(targetPartitions, totalBuckets);
+
+    if (configuredBloomIndexParallelism > 0) {
+      // If bloom index parallelism is configured, the number of buckets is
+      // limited by the configured bloom index parallelism
+      this.partitions = Math.min(configuredBloomIndexParallelism, totalBuckets);
+    } else if (shouldUseDynamicParallelism) {
+      // If bloom index parallelism is not configured, and dynamic buckets are enabled,
+      // honor the number of buckets calculated based on the keys per bucket
+      this.partitions = totalBuckets;
+    } else {
+      // If bloom index parallelism is not configured, and dynamic buckets are disabled,
+      // honor the input parallelism as the max number of buckets to use
+      this.partitions = Math.min(inputParallelism, totalBuckets);
+    }
 
     // PHASE 1 : start filling upto minimum number of buckets into partitions, taking all but one bucket from each file
     // This tries to first optimize for goal 1 above, with knowledge that each partition needs a certain minimum number
     // of buckets and assigns buckets in the same order as file groups. If we were to simply round robin, then buckets
     // for a file group is more or less guaranteed to be placed on different partitions all the time.
     int minBucketsPerPartition = Math.max((int) Math.floor((1.0 * totalBuckets) / partitions), 1);
-    LOG.info("TotalBuckets {}, min_buckets/partition {}, partitions {}", totalBuckets, minBucketsPerPartition, partitions);
+    log.info("TotalBuckets {}, min_buckets/partition {}, partitions {}", totalBuckets, minBucketsPerPartition, partitions);
     int[] bucketsFilled = new int[partitions];
     Map<HoodieFileGroupId, AtomicInteger> bucketsFilledPerFileGroup = new HashMap<>();
     int partitionIndex = 0;
@@ -127,13 +148,17 @@ public class BucketizedBloomCheckPartitioner extends Partitioner {
       }
     }
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Partitions assigned per file groups :" + fileGroupToPartitions);
+    if (log.isDebugEnabled()) {
+      log.debug("Partitions assigned per file group: {}", fileGroupToPartitions);
       StringBuilder str = new StringBuilder();
       for (int i = 0; i < bucketsFilled.length; i++) {
-        str.append("p" + i + " : " + bucketsFilled[i] + ",");
+        str.append("{p").append(i).append(": ").append(bucketsFilled[i]).append("}, ");
       }
-      LOG.debug("Num buckets assigned per file group :" + str);
+      // Strip last ", " away
+      if (bucketsFilled.length > 0) {
+        str.setLength(str.length() - 2);
+      }
+      log.debug("Num buckets assigned per partition: {}", str);
     }
   }
 
@@ -151,9 +176,5 @@ public class BucketizedBloomCheckPartitioner extends Partitioner {
     final int idx = Math.floorMod((int) hashOfKey, candidatePartitions.size());
     assert idx >= 0;
     return candidatePartitions.get(idx);
-  }
-
-  Map<HoodieFileGroupId, List<Integer>> getFileGroupToPartitions() {
-    return fileGroupToPartitions;
   }
 }

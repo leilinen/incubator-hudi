@@ -30,8 +30,6 @@ import org.apache.hudi.io.storage.HoodieIOFactory;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
-import org.apache.hadoop.fs.Path;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -65,7 +63,8 @@ public class BaseFileRecordParsingUtils {
                                                                                    HoodieWriteStat writeStat,
                                                                                    Integer writesFileIdEncoding,
                                                                                    String instantTime,
-                                                                                   HoodieStorage storage) {
+                                                                                   HoodieStorage storage,
+                                                                                   boolean isPartitionedRLI) {
     String partition = writeStat.getPartitionPath();
     String latestFileName = FSUtils.getFileNameFromPath(writeStat.getPath());
     String fileId = FSUtils.getFileId(latestFileName);
@@ -85,7 +84,7 @@ public class BaseFileRecordParsingUtils {
 
     if (recordStatusListMap.containsKey(RecordStatus.DELETE)) {
       hoodieRecords.addAll(recordStatusListMap.get(RecordStatus.DELETE).stream()
-          .map(recordKey -> HoodieMetadataPayload.createRecordIndexDelete(recordKey)).collect(toList()));
+          .map(recordKey -> HoodieMetadataPayload.createRecordIndexDelete(recordKey, partition, isPartitionedRLI)).collect(toList()));
     }
 
     return hoodieRecords.iterator();
@@ -168,7 +167,7 @@ public class BaseFileRecordParsingUtils {
   }
 
   private static Set<String> getRecordKeysFromBaseFile(HoodieStorage storage, String basePath, String partition, String fileName) {
-    StoragePath dataFilePath = new StoragePath(basePath, StringUtils.isNullOrEmpty(partition) ? fileName : (partition + Path.SEPARATOR) + fileName);
+    StoragePath dataFilePath = new StoragePath(basePath, StringUtils.isNullOrEmpty(partition) ? fileName : (partition + StoragePath.SEPARATOR) + fileName);
     FileFormatUtils fileFormatUtils = HoodieIOFactory.getIOFactory(storage).getFileFormatUtils(HoodieFileFormat.PARQUET);
     return fileFormatUtils.readRowKeys(storage, dataFilePath);
   }

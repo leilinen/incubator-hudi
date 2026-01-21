@@ -29,6 +29,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.types.RowKind;
+import org.apache.flink.types.variant.Variant;
 
 /**
  * RowData implementation for Hoodie Row. It wraps an {@link RowData} and keeps meta columns locally. But the {@link RowData}
@@ -161,9 +162,13 @@ public abstract class AbstractHoodieRowData implements RowData {
     return row.getMap(rebaseOrdinal(ordinal));
   }
 
-  private String getMetaColumnVal(int ordinal) {
+  protected String getMetaColumnVal(int ordinal) {
     return this.metaColumns[ordinal];
   }
 
   protected abstract int rebaseOrdinal(int ordinal);
+
+  public Variant getVariant(int i) {
+    throw new UnsupportedOperationException("Variant is not supported yet.");
+  }
 }

@@ -26,7 +26,6 @@ import org.apache.hudi.index.bloom.HoodieGlobalBloomIndex;
 import org.apache.hudi.index.bloom.SparkHoodieBloomIndexHelper;
 import org.apache.hudi.index.bucket.HoodieSimpleBucketIndex;
 import org.apache.hudi.index.bucket.HoodieSparkConsistentBucketIndex;
-import org.apache.hudi.index.hbase.SparkHoodieHBaseIndex;
 import org.apache.hudi.index.inmemory.HoodieInMemoryHashIndex;
 import org.apache.hudi.index.simple.HoodieGlobalSimpleIndex;
 import org.apache.hudi.index.simple.HoodieSimpleIndex;
@@ -47,8 +46,6 @@ public final class SparkHoodieIndexFactory {
     }
 
     switch (config.getIndexType()) {
-      case HBASE:
-        return new SparkHoodieHBaseIndex(config);
       case INMEMORY:
         return new HoodieInMemoryHashIndex(config);
       case BLOOM:
@@ -69,7 +66,10 @@ public final class SparkHoodieIndexFactory {
             throw new HoodieIndexException("Unknown bucket index engine type: " + config.getBucketIndexEngineType());
         }
       case RECORD_INDEX:
-        return new SparkMetadataTableRecordIndex(config);
+      case GLOBAL_RECORD_LEVEL_INDEX:
+        return new SparkMetadataTableGlobalRecordLevelIndex(config);
+      case RECORD_LEVEL_INDEX:
+        return new SparkMetadataTableRecordLevelIndex(config);
       default:
         throw new HoodieIndexException("Index type unspecified, set " + config.getIndexType());
     }
@@ -82,8 +82,6 @@ public final class SparkHoodieIndexFactory {
    */
   public static boolean isGlobalIndex(HoodieWriteConfig config) {
     switch (config.getIndexType()) {
-      case HBASE:
-        return true;
       case INMEMORY:
         return true;
       case BLOOM:
@@ -97,7 +95,10 @@ public final class SparkHoodieIndexFactory {
       case BUCKET:
         return false;
       case RECORD_INDEX:
+      case GLOBAL_RECORD_LEVEL_INDEX:
         return true;
+      case RECORD_LEVEL_INDEX:
+        return false;
       default:
         return createIndex(config).isGlobal();
     }

@@ -59,8 +59,7 @@ import org.apache.hudi.table.action.rollback.BaseRollbackPlanActionExecutor;
 import org.apache.hudi.table.action.rollback.MergeOnReadRollbackActionExecutor;
 import org.apache.hudi.table.action.rollback.RestorePlanActionExecutor;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Collections;
 import java.util.Iterator;
@@ -85,9 +84,8 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.deleteMetadataTab
  * action
  * </p>
  */
+@Slf4j
 public class HoodieSparkMergeOnReadTable<T> extends HoodieSparkCopyOnWriteTable<T> implements HoodieCompactionHandler<T> {
-
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieSparkMergeOnReadTable.class);
 
   HoodieSparkMergeOnReadTable(HoodieWriteConfig config, HoodieEngineContext context, HoodieTableMetaClient metaClient) {
     super(config, context, metaClient);
@@ -151,7 +149,7 @@ public class HoodieSparkMergeOnReadTable<T> extends HoodieSparkCopyOnWriteTable<
       HoodieEngineContext context, String compactionInstantTime) {
     RunCompactionActionExecutor<T> compactionExecutor = new RunCompactionActionExecutor<>(
         context, config, this, compactionInstantTime, new HoodieSparkMergeOnReadTableCompactor<>(),
-        new HoodieSparkCopyOnWriteTable<>(config, context, getMetaClient()), WriteOperationType.COMPACT);
+        WriteOperationType.COMPACT);
     return compactionExecutor.execute();
   }
 
@@ -171,7 +169,7 @@ public class HoodieSparkMergeOnReadTable<T> extends HoodieSparkCopyOnWriteTable<
   public HoodieWriteMetadata<HoodieData<WriteStatus>> logCompact(
       HoodieEngineContext context, String logCompactionInstantTime) {
     RunCompactionActionExecutor logCompactionExecutor = new RunCompactionActionExecutor(context, config, this,
-        logCompactionInstantTime, new HoodieSparkMergeOnReadTableCompactor<>(), this, WriteOperationType.LOG_COMPACT);
+        logCompactionInstantTime, new HoodieSparkMergeOnReadTableCompactor<>(), WriteOperationType.LOG_COMPACT);
     return logCompactionExecutor.execute();
   }
 
@@ -179,7 +177,7 @@ public class HoodieSparkMergeOnReadTable<T> extends HoodieSparkCopyOnWriteTable<
   public void rollbackBootstrap(HoodieEngineContext context, String instantTime) {
     // Delete metadata table to rollback a failed bootstrap. re-attempt of bootstrap will re-initialize the mdt.
     try {
-      LOG.info("Deleting metadata table because we are rolling back failed bootstrap. ");
+      log.info("Deleting metadata table because we are rolling back failed bootstrap. ");
       deleteMetadataTable(config.getBasePath(), context);
     } catch (HoodieMetadataException e) {
       throw new HoodieException("Failed to delete metadata table.", e);

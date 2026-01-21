@@ -60,6 +60,20 @@ public class FileSliceHandler extends Handler {
         .map(FileSliceDTO::fromFileSlice).collect(Collectors.toList());
   }
 
+  public List<FileSliceDTO> getLatestMergedFileSlicesBeforeOrOnIncludingInflight(String basePath, String partitionPath,
+                                                                                 String maxInstantTime,
+                                                                                 String currentInstantTime) {
+    return viewManager.getFileSystemView(basePath)
+        .getLatestMergedFileSlicesBeforeOrOnIncludingInflight(partitionPath, maxInstantTime, currentInstantTime)
+        .map(FileSliceDTO::fromFileSlice).collect(Collectors.toList());
+  }
+
+  public List<FileSliceDTO> getLatestMergedFileSliceBeforeOrOn(String basePath, String partitionPath,
+                                                               String maxInstantTime, String fileId) {
+    return viewManager.getFileSystemView(basePath).getLatestMergedFileSliceBeforeOrOn(partitionPath, maxInstantTime, fileId)
+        .map(FileSliceDTO::fromFileSlice).map(Collections::singletonList).orElse(Collections.emptyList());
+  }
+
   public List<FileSliceDTO> getLatestFileSlicesBeforeOrOn(String basePath, String partitionPath, String maxInstantTime,
       boolean includeFileSlicesInPendingCompaction) {
     return viewManager.getFileSystemView(basePath)

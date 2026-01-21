@@ -21,8 +21,11 @@ package org.apache.hudi.table;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.util.collection.Pair;
 
+import lombok.Getter;
+
 import java.io.Serializable;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -35,43 +38,43 @@ public class WorkloadProfile implements Serializable {
   /**
    * Computed workload stats.
    */
-  protected final HashMap<String, WorkloadStat> inputPartitionPathStatMap;
+  @Getter
+  protected final Map<String, WorkloadStat> inputPartitionPathStatMap;
 
   /**
    * Execution/Output workload stats
    */
-  protected final HashMap<String, WorkloadStat> outputPartitionPathStatMap;
+  @Getter
+  protected final Map<String, WorkloadStat> outputPartitionPathStatMap;
 
   /**
    * Global workloadStat.
    */
+  @Getter
   protected final WorkloadStat globalStat;
 
   /**
    * Write operation type.
    */
+  @Getter
   private WriteOperationType operationType;
 
   private final boolean hasOutputWorkLoadStats;
 
-  public WorkloadProfile(Pair<HashMap<String, WorkloadStat>, WorkloadStat> profile) {
+  public WorkloadProfile(Pair<Map<String, WorkloadStat>, WorkloadStat> profile) {
     this(profile, false);
   }
 
-  public WorkloadProfile(Pair<HashMap<String, WorkloadStat>, WorkloadStat> profile, boolean hasOutputWorkLoadStats) {
+  public WorkloadProfile(Pair<Map<String, WorkloadStat>, WorkloadStat> profile, boolean hasOutputWorkLoadStats) {
     this.inputPartitionPathStatMap = profile.getLeft();
     this.globalStat = profile.getRight();
     this.outputPartitionPathStatMap = new HashMap<>();
     this.hasOutputWorkLoadStats = hasOutputWorkLoadStats;
   }
 
-  public WorkloadProfile(Pair<HashMap<String, WorkloadStat>, WorkloadStat> profile, WriteOperationType operationType, boolean hasOutputWorkLoadStats) {
+  public WorkloadProfile(Pair<Map<String, WorkloadStat>, WorkloadStat> profile, WriteOperationType operationType, boolean hasOutputWorkLoadStats) {
     this(profile, hasOutputWorkLoadStats);
     this.operationType = operationType;
-  }
-
-  public WorkloadStat getGlobalStat() {
-    return globalStat;
   }
 
   public Set<String> getPartitionPaths() {
@@ -80,14 +83,6 @@ public class WorkloadProfile implements Serializable {
 
   public Set<String> getOutputPartitionPaths() {
     return hasOutputWorkLoadStats ? outputPartitionPathStatMap.keySet() : inputPartitionPathStatMap.keySet();
-  }
-
-  public HashMap<String, WorkloadStat> getInputPartitionPathStatMap() {
-    return inputPartitionPathStatMap;
-  }
-
-  public HashMap<String, WorkloadStat> getOutputPartitionPathStatMap() {
-    return outputPartitionPathStatMap;
   }
 
   public boolean hasOutputWorkLoadStats() {
@@ -106,10 +101,6 @@ public class WorkloadProfile implements Serializable {
 
   public WorkloadStat getOutputWorkloadStat(String partitionPath) {
     return hasOutputWorkLoadStats ? outputPartitionPathStatMap.get(partitionPath) : inputPartitionPathStatMap.get(partitionPath);
-  }
-
-  public WriteOperationType getOperationType() {
-    return operationType;
   }
 
   @Override

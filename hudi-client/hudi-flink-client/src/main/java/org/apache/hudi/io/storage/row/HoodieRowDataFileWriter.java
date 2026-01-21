@@ -20,9 +20,9 @@ package org.apache.hudi.io.storage.row;
 
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.io.storage.HoodieFileWriter;
 
-import org.apache.avro.Schema;
 import org.apache.flink.table.data.RowData;
 
 import java.io.IOException;
@@ -46,22 +46,24 @@ public interface HoodieRowDataFileWriter extends HoodieFileWriter {
   void writeRow(String key, RowData row) throws IOException;
 
   /**
-   * Writes an {@link RowData} to the {@link HoodieRowDataFileWriter}.
+   * Writes an {@link RowData} into the {@link HoodieRowDataFileWriter} with metadata fields.
+   * Also takes in associated record key to be added to bloom filter if required.
    *
-   * @throws IOException on any exception while writing.
+   * @param key record key
+   * @param row data row
    */
-  void writeRow(RowData row) throws IOException;
+  void writeRowWithMetaData(HoodieKey key, RowData row) throws IOException;
 
   /**
    * Closes the {@link HoodieRowDataFileWriter} and may not take in any more writes.
    */
   void close() throws IOException;
 
-  default void writeWithMetadata(HoodieKey key, HoodieRecord record, Schema schema, Properties props) throws IOException {
-    writeRow(key.getRecordKey(), (RowData) record.getData());
+  default void writeWithMetadata(HoodieKey key, HoodieRecord record, HoodieSchema schema, Properties props) throws IOException {
+    writeRowWithMetaData(key, (RowData) record.getData());
   }
 
-  default void write(String recordKey, HoodieRecord record, Schema schema, Properties props) throws IOException {
+  default void write(String recordKey, HoodieRecord record, HoodieSchema schema, Properties props) throws IOException {
     this.writeRow(recordKey, (RowData) record.getData());
   }
 }

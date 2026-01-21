@@ -19,21 +19,47 @@
 
 package org.apache.hudi.io.hfile;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 
 /**
  * Represents a {@link HFileBlockType#META} block.
  */
 public class HFileMetaBlock extends HFileBlock {
+  protected KeyValueEntry entryToWrite;
+
   protected HFileMetaBlock(HFileContext context,
                            byte[] byteBuff,
                            int startOffsetInBuff) {
     super(context, HFileBlockType.META, byteBuff, startOffsetInBuff);
   }
 
+  private HFileMetaBlock(HFileContext context, KeyValueEntry keyValueEntry) {
+    super(context, HFileBlockType.META, -1L);
+    this.entryToWrite = keyValueEntry;
+  }
+
+  static HFileMetaBlock createMetaBlockToWrite(HFileContext context,
+                                               KeyValueEntry keyValueEntry) {
+    return new HFileMetaBlock(context, keyValueEntry);
+  }
+
   public ByteBuffer readContent() {
     return ByteBuffer.wrap(
         getByteBuff(),
         startOffsetInBuff + HFILEBLOCK_HEADER_SIZE, uncompressedSizeWithoutHeader);
+  }
+
+  // ================ Below are for Write ================
+
+  public byte[] getFirstKey() {
+    return entryToWrite.key;
+  }
+
+  @Override
+  public ByteBuffer getUncompressedBlockDataToWrite() throws IOException {
+    // Note that: only value should be store in the block.
+    // The key is stored in the meta index block.
+    return ByteBuffer.wrap(entryToWrite.value);
   }
 }

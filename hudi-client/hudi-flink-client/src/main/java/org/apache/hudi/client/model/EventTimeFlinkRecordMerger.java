@@ -20,12 +20,9 @@
 package org.apache.hudi.client.model;
 
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.ValidationUtils;
-import org.apache.hudi.common.util.collection.Pair;
-
-import org.apache.avro.Schema;
+import org.apache.hudi.common.engine.RecordContext;
+import org.apache.hudi.common.model.HoodieRecordMerger;
+import org.apache.hudi.common.table.read.BufferedRecord;
 
 import java.io.IOException;
 
@@ -33,36 +30,26 @@ import java.io.IOException;
  * Record merger for Flink HoodieRecord that implements event time based merging strategy.
  */
 public class EventTimeFlinkRecordMerger extends HoodieFlinkRecordMerger {
+
   @Override
   public String getMergingStrategy() {
     return EVENT_TIME_BASED_MERGE_STRATEGY_UUID;
   }
 
   @Override
-  public Option<Pair<HoodieRecord, Schema>> merge(
-      HoodieRecord older,
-      Schema oldSchema,
-      HoodieRecord newer,
-      Schema newSchema,
+  public <T> BufferedRecord<T> merge(
+      BufferedRecord<T> older,
+      BufferedRecord<T> newer,
+      RecordContext<T> recordContext,
       TypedProperties props) throws IOException {
-    // Note: can be removed if we can ensure the type from invoker.
-    ValidationUtils.checkArgument(older.getRecordType() == HoodieRecord.HoodieRecordType.FLINK);
-    ValidationUtils.checkArgument(newer.getRecordType() == HoodieRecord.HoodieRecordType.FLINK);
+    if (HoodieRecordMerger.isCommitTimeOrderingDelete(older, newer)) {
+      return newer;
+    }
 
-    if (older.getOrderingValue(oldSchema, props).compareTo(newer.getOrderingValue(newSchema, props)) > 0) {
-      if (older.isDelete(oldSchema, props)) {
-        // Delete record
-        return Option.empty();
-      } else {
-        return Option.of(Pair.of(older, oldSchema));
-      }
+    if (older.getOrderingValue().compareTo(newer.getOrderingValue()) > 0) {
+      return older;
     } else {
-      if (newer.isDelete(newSchema, props)) {
-        // Delete record
-        return Option.empty();
-      } else {
-        return Option.of(Pair.of(newer, newSchema));
-      }
+      return newer;
     }
   }
 }

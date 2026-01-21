@@ -27,6 +27,7 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.execution.FlinkLazyInsertIterable;
@@ -34,15 +35,15 @@ import org.apache.hudi.io.ExplicitWriteHandleFactory;
 import org.apache.hudi.io.HoodieCreateHandle;
 import org.apache.hudi.io.HoodieMergeHandle;
 import org.apache.hudi.io.HoodieWriteHandle;
+import org.apache.hudi.io.HoodieWriteMergeHandle;
+import org.apache.hudi.io.IOUtils;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -61,47 +62,45 @@ import java.util.stream.Collectors;
  * <p>Computing the records batch locations all at a time is a pressure to the engine,
  * we should avoid that in streaming system.
  */
+@Slf4j
 public abstract class BaseFlinkCommitActionExecutor<T> extends
-    BaseCommitActionExecutor<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>, HoodieWriteMetadata> {
-
-  private static final Logger LOG = LoggerFactory.getLogger(BaseFlinkCommitActionExecutor.class);
+    BaseCommitActionExecutor<T, Iterator<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>, HoodieWriteMetadata> {
 
   protected HoodieWriteHandle<?, ?, ?, ?> writeHandle;
 
+  protected final BucketInfo bucketInfo;
+
   public BaseFlinkCommitActionExecutor(HoodieEngineContext context,
                                        HoodieWriteHandle<?, ?, ?, ?> writeHandle,
+                                       BucketInfo bucketInfo,
                                        HoodieWriteConfig config,
                                        HoodieTable table,
                                        String instantTime,
                                        WriteOperationType operationType) {
-    this(context, writeHandle, config, table, instantTime, operationType, Option.empty());
+    this(context, writeHandle, bucketInfo, config, table, instantTime, operationType, Option.empty());
   }
 
   public BaseFlinkCommitActionExecutor(HoodieEngineContext context,
                                        HoodieWriteHandle<?, ?, ?, ?> writeHandle,
+                                       BucketInfo bucketInfo,
                                        HoodieWriteConfig config,
                                        HoodieTable table,
                                        String instantTime,
                                        WriteOperationType operationType,
                                        Option extraMetadata) {
     super(context, config, table, instantTime, operationType, extraMetadata);
+    this.bucketInfo = bucketInfo;
     this.writeHandle = writeHandle;
   }
 
   @Override
-  public HoodieWriteMetadata<List<WriteStatus>> execute(List<HoodieRecord<T>> inputRecords) {
+  public HoodieWriteMetadata<List<WriteStatus>> execute(Iterator<HoodieRecord<T>> inputRecords) {
     return execute(inputRecords, Option.empty());
   }
 
   @Override
-  public HoodieWriteMetadata<List<WriteStatus>> execute(List<HoodieRecord<T>> inputRecords, Option<HoodieTimer> sourceReadAndIndexTimer) {
-    final HoodieRecord<?> record = inputRecords.get(0);
-    final String partitionPath = record.getPartitionPath();
-    final String fileId = record.getCurrentLocation().getFileId();
-    final BucketType bucketType = record.getCurrentLocation().getInstantTime().equals("I")
-        ? BucketType.INSERT
-        : BucketType.UPDATE;
-    return execute(inputRecords.iterator(), sourceReadAndIndexTimer, partitionPath, fileId, bucketType);
+  public HoodieWriteMetadata<List<WriteStatus>> execute(Iterator<HoodieRecord<T>> inputRecords, Option<HoodieTimer> sourceReadAndIndexTimer) {
+    return execute(inputRecords, sourceReadAndIndexTimer, bucketInfo.getPartitionPath(), bucketInfo.getFileIdPrefix(), bucketInfo.getBucketType());
   }
 
   public HoodieWriteMetadata<List<WriteStatus>> execute(Iterator<HoodieRecord<T>> recordItr, BucketInfo bucketInfo) {
@@ -167,7 +166,7 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
         // the second batch batch2 tries to reuse the same bucket
         // and append instead of UPDATE.
         return handleInsert(fileIdHint, recordItr);
-      } else if (this.writeHandle instanceof HoodieMergeHandle) {
+      } else if (this.writeHandle instanceof HoodieWriteMergeHandle) {
         return handleUpdate(partitionPath, fileIdHint, recordItr);
       } else {
         switch (bucketType) {
@@ -181,7 +180,7 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
       }
     } catch (Throwable t) {
       String msg = "Error upserting bucketType " + bucketType + " for partition :" + partitionPath;
-      LOG.error(msg, t);
+      log.error(msg, t);
       throw new HoodieUpsertException(msg, t);
     }
   }
@@ -190,30 +189,15 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
   public Iterator<List<WriteStatus>> handleUpdate(String partitionPath, String fileId,
                                                   Iterator<HoodieRecord<T>> recordItr)
       throws IOException {
-    // This is needed since sometimes some buckets are never picked in getPartition() and end up with 0 records
-    if (!recordItr.hasNext()) {
-      LOG.info("Empty partition with fileId => " + fileId);
-      return Collections.singletonList((List<WriteStatus>) Collections.EMPTY_LIST).iterator();
-    }
+    ValidationUtils.checkArgument(this.writeHandle instanceof HoodieMergeHandle,
+        "`writeHandle` should be an instance of `HoodieMergeHandle`");
     // these are updates
-    HoodieMergeHandle<?, ?, ?, ?> upsertHandle = (HoodieMergeHandle<?, ?, ?, ?>) this.writeHandle;
-    return handleUpdateInternal(upsertHandle, fileId);
-  }
-
-  protected Iterator<List<WriteStatus>> handleUpdateInternal(HoodieMergeHandle<?, ?, ?, ?> upsertHandle, String fileId)
-      throws IOException {
-    table.runMerge(upsertHandle, instantTime, fileId);
-    return upsertHandle.getWriteStatusesAsIterator();
+    return IOUtils.runMerge((HoodieMergeHandle<?, ?, ?, ?>) this.writeHandle, instantTime, fileId);
   }
 
   @Override
   public Iterator<List<WriteStatus>> handleInsert(String idPfx, Iterator<HoodieRecord<T>> recordItr)
       throws Exception {
-    // This is needed since sometimes some buckets are never picked in getPartition() and end up with 0 records
-    if (!recordItr.hasNext()) {
-      LOG.info("Empty partition");
-      return Collections.singletonList((List<WriteStatus>) Collections.EMPTY_LIST).iterator();
-    }
     return new FlinkLazyInsertIterable<>(recordItr, true, config, instantTime, table, idPfx,
         taskContextSupplier, new ExplicitWriteHandleFactory<>(writeHandle));
   }

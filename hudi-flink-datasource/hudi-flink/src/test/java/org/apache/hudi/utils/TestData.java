@@ -19,33 +19,36 @@
 package org.apache.hudi.utils;
 
 import org.apache.hudi.client.common.HoodieFlinkEngineContext;
-import org.apache.hudi.common.config.HoodieCommonConfig;
+import org.apache.hudi.client.model.PartialUpdateFlinkRecordMerger;
+import org.apache.hudi.common.config.HoodieMemoryConfig;
 import org.apache.hudi.common.fs.FSUtils;
-import org.apache.hudi.common.model.BaseFile;
 import org.apache.hudi.common.model.FileSlice;
-import org.apache.hudi.common.model.HoodieAvroRecord;
-import org.apache.hudi.common.model.HoodieLogFile;
+import org.apache.hudi.common.model.HoodieRecordMerger;
+import org.apache.hudi.common.model.PartialUpdateAvroPayload;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
-import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
+import org.apache.hudi.common.table.read.HoodieFileGroupReader;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.sink.utils.BucketStreamWriteFunctionWrapper;
-import org.apache.hudi.sink.utils.StreamWriteFunctionWrapper;
 import org.apache.hudi.sink.utils.BulkInsertFunctionWrapper;
 import org.apache.hudi.sink.utils.ConsistentBucketStreamWriteFunctionWrapper;
 import org.apache.hudi.sink.utils.InsertFunctionWrapper;
+import org.apache.hudi.sink.utils.StreamWriteFunctionWrapper;
 import org.apache.hudi.sink.utils.TestFunctionWrapper;
-import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.table.HoodieFlinkTable;
+import org.apache.hudi.table.format.FormatUtils;
+import org.apache.hudi.table.format.InternalSchemaManager;
+import org.apache.hudi.util.AvroToRowDataConverters;
+import org.apache.hudi.util.RowDataQueryContexts;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.generic.GenericRecordBuilder;
-import org.apache.avro.generic.IndexedRecord;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.table.data.DecimalData;
@@ -90,8 +93,6 @@ import static junit.framework.TestCase.assertEquals;
 import static org.apache.hudi.common.table.HoodieTableConfig.HOODIE_PROPERTIES_FILE;
 import static org.apache.hudi.common.table.HoodieTableMetaClient.METAFOLDER_NAME;
 import static org.apache.hudi.common.testutils.HoodieTestUtils.createMetaClient;
-import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.HOODIE_RECORD_KEY_COL_POS;
-import static org.apache.hudi.table.format.FormatUtils.buildAvroRecordBySchema;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -180,6 +181,10 @@ public class TestData {
         insertRow(StringData.fromString("id1"), StringData.fromString("Danny"), 23,
             TimestampData.fromEpochMillis(i), StringData.fromString("par1"))));
   }
+
+  public static List<RowData> DATA_SET_UPDATE_BEFORE = Arrays.asList(
+      updateBeforeRow(StringData.fromString("id1"), StringData.fromString("Danny"), 23,
+          TimestampData.fromEpochMillis(1), StringData.fromString("par1")));
 
   // data set of test_source.data
   public static List<RowData> DATA_SET_SOURCE_INSERT = Arrays.asList(
@@ -367,6 +372,14 @@ public class TestData {
       insertRow(StringData.fromString("id1"), StringData.fromString("Danny"), 23,
           TimestampData.fromEpochMillis(1), StringData.fromString("par2")));
 
+  public static List<RowData> DATA_SET_PART3 = Collections.singletonList(
+      insertRow(StringData.fromString("id3"), StringData.fromString("Julian"), 53,
+          TimestampData.fromEpochMillis(3), StringData.fromString("par2")));
+
+  public static List<RowData> DATA_SET_PART4 = Collections.singletonList(
+      insertRow(StringData.fromString("id4"), StringData.fromString("Fabian"), 31,
+          TimestampData.fromEpochMillis(4), StringData.fromString("par2")));
+
   public static List<RowData> DATA_SET_SINGLE_DELETE = Collections.singletonList(
       deleteRow(StringData.fromString("id1"), StringData.fromString("Danny"), 23,
           TimestampData.fromEpochMillis(5), StringData.fromString("par1")));
@@ -411,6 +424,14 @@ public class TestData {
       deleteRow(StringData.fromString("id1"), StringData.fromString("Danny"), 22,
           TimestampData.fromEpochMillis(2), StringData.fromString("par1"))
   );
+
+  public static List<RowData> DATA_SET_WITH_ATOMIC_TYPES = Arrays.asList(
+      insertRow(TestConfigurations.ROW_TYPE_WITH_ATOMIC_TYPES, true, (byte) 1, (short) 11, 111, 1111L, 10.11f, 11.111, TimestampData.fromEpochMillis(1),
+          1000, 1, DecimalData.fromBigDecimal(new BigDecimal("1.11"), 38, 18), StringData.fromString("str1"), StringData.fromString("par1")),
+      insertRow(TestConfigurations.ROW_TYPE_WITH_ATOMIC_TYPES, true, (byte) 2, (short) 22, 222, 2222L, 20.22f, 22.222, TimestampData.fromEpochMillis(2),
+          2000, 2, DecimalData.fromBigDecimal(new BigDecimal("2.22"), 38, 18), StringData.fromString("str2"), StringData.fromString("par2")),
+      insertRow(TestConfigurations.ROW_TYPE_WITH_ATOMIC_TYPES, true, (byte) 3, (short) 33, 333, 3333L, 30.33f, 33.333, TimestampData.fromEpochMillis(3),
+          3000, 3, DecimalData.fromBigDecimal(new BigDecimal("3.33"), 38, 18), StringData.fromString("str3"), StringData.fromString("par3")));
 
   // data types handled specifically for Hoodie Key
   public static List<RowData> DATA_SET_INSERT_HOODIE_KEY_SPECIAL_DATA_TYPE = new ArrayList<>();
@@ -532,7 +553,7 @@ public class TestData {
   public static void writeData(
       List<RowData> dataBuffer,
       Configuration conf) throws Exception {
-    final TestFunctionWrapper<RowData> funcWrapper = getWritePipeline(conf.getString(FlinkOptions.PATH), conf);
+    final TestFunctionWrapper<RowData> funcWrapper = getWritePipeline(conf.get(FlinkOptions.PATH), conf);
     funcWrapper.openFunction();
 
     for (RowData rowData : dataBuffer) {
@@ -562,7 +583,7 @@ public class TestData {
   public static void writeDataAsBatch(
       List<RowData> dataBuffer,
       Configuration conf) throws Exception {
-    TestFunctionWrapper<RowData> funcWrapper = getWritePipeline(conf.getString(FlinkOptions.PATH), conf);
+    TestFunctionWrapper<RowData> funcWrapper = getWritePipeline(conf.get(FlinkOptions.PATH), conf);
     funcWrapper.openFunction();
 
     for (RowData rowData : dataBuffer) {
@@ -824,6 +845,38 @@ public class TestData {
     }
   }
 
+  public static List<GenericRecord> readAllData(
+      File baseFile, RowType rowType, int partitions) throws IOException {
+    assert baseFile.isDirectory();
+    FileFilter filter = file -> !file.getName().startsWith(".");
+    File[] partitionDirs = baseFile.listFiles(filter);
+
+    assertNotNull(partitionDirs);
+    assertThat(partitionDirs.length, is(partitions));
+
+    List<GenericRecord> result = new ArrayList<>();
+    AvroToRowDataConverters.AvroToRowDataConverter converter =
+        AvroToRowDataConverters.createConverter(rowType, true);
+
+    for (File partitionDir : partitionDirs) {
+      File[] dataFiles = partitionDir.listFiles(filter);
+      assertNotNull(dataFiles);
+
+      for (File dataFile : dataFiles) {
+        ParquetReader<GenericRecord> reader = AvroParquetReader
+            .<GenericRecord>builder(new Path(dataFile.getAbsolutePath())).build();
+
+        GenericRecord nextRecord = reader.read();
+        while (nextRecord != null) {
+          result.add(nextRecord);
+          nextRecord = reader.read();
+        }
+      }
+    }
+
+    return result;
+  }
+
   /**
    * Checks the source data are written as expected.
    *
@@ -891,13 +944,11 @@ public class TestData {
    *
    * <p>Note: Replace it with the Flink reader when it is supported.
    *
-   * @param storage    {@link HoodieStorage} instance.
    * @param baseFile   The file base to check, should be a directory
    * @param expected   The expected results mapping, the key should be the partition path
    * @param partitions The expected partition number
    */
   public static void checkWrittenDataMOR(
-      HoodieStorage storage,
       File baseFile,
       Map<String, String> expected,
       int partitions) throws Exception {
@@ -908,10 +959,24 @@ public class TestData {
     // 1. init flink table
     HoodieWriteConfig config = HoodieWriteConfig.newBuilder()
         .fromFile(hoodiePropertiesFile)
-        .withPath(basePath).build();
+        .withMemoryConfig(
+            HoodieMemoryConfig.newBuilder()
+                .withMaxMemoryMaxSize(
+                    FlinkOptions.WRITE_MERGE_MAX_MEMORY.defaultValue() * 1024 * 1024L,
+                    FlinkOptions.COMPACTION_MAX_MEMORY.defaultValue() * 1024 * 1024L)
+                .build())
+        .withPath(basePath)
+        .build();
+    // deal with partial update merger
+    if (config.getString(HoodieTableConfig.PAYLOAD_CLASS_NAME).contains(PartialUpdateAvroPayload.class.getSimpleName())
+        || (config.getString(HoodieTableConfig.RECORD_MERGE_STRATEGY_ID) != null
+        && config.getString(HoodieTableConfig.RECORD_MERGE_STRATEGY_ID).equalsIgnoreCase(HoodieRecordMerger.CUSTOM_MERGE_STRATEGY_UUID))) {
+      config.setValue(HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES.key(), PartialUpdateFlinkRecordMerger.class.getName());
+    }
+
     HoodieTableMetaClient metaClient = createMetaClient(basePath);
     HoodieFlinkTable<?> table = HoodieFlinkTable.create(config, HoodieFlinkEngineContext.DEFAULT, metaClient);
-    Schema schema = new TableSchemaResolver(metaClient).getTableAvroSchema();
+    HoodieSchema schema = new TableSchemaResolver(metaClient).getTableSchema();
 
     String latestInstant = metaClient.getActiveTimeline().filterCompletedInstants()
         .lastInstant().map(HoodieInstant::requestedTime).orElse(null);
@@ -922,54 +987,14 @@ public class TestData {
     assertThat("The partitions number should be: " + partitions, partitionDirs.length, is(partitions));
 
     // 2. check each partition data
-    final int[] requiredPos = IntStream.range(0, schema.getFields().size()).toArray();
     for (File partitionDir : partitionDirs) {
       List<String> readBuffer = new ArrayList<>();
       List<FileSlice> fileSlices = table.getSliceView().getLatestMergedFileSlicesBeforeOrOn(partitionDir.getName(), latestInstant).collect(Collectors.toList());
       for (FileSlice fileSlice : fileSlices) {
-        HoodieMergedLogRecordScanner scanner = null;
-        List<String> logPaths = fileSlice.getLogFiles()
-            .sorted(HoodieLogFile.getLogFileComparator())
-            .map(logFile -> logFile.getPath().toString())
-            .collect(Collectors.toList());
-        if (logPaths.size() > 0) {
-          scanner = getScanner(storage, basePath, logPaths, schema, latestInstant);
-        }
-        String baseFilePath = fileSlice.getBaseFile().map(BaseFile::getPath).orElse(null);
-        Set<String> keyToSkip = new HashSet<>();
-        if (baseFilePath != null) {
-          // read the base file first
-          GenericRecordBuilder recordBuilder = new GenericRecordBuilder(schema);
-          ParquetReader<GenericRecord> reader = AvroParquetReader.<GenericRecord>builder(new Path(baseFilePath)).build();
-          GenericRecord currentRecord = reader.read();
-          while (currentRecord != null) {
-            String curKey = currentRecord.get(HOODIE_RECORD_KEY_COL_POS).toString();
-            if (scanner != null && scanner.getRecords().containsKey(curKey)) {
-              keyToSkip.add(curKey);
-              // merge row with log.
-              final HoodieAvroRecord<?> record = (HoodieAvroRecord<?>) scanner.getRecords().get(curKey);
-              Option<IndexedRecord> combineResult = record.getData().combineAndGetUpdateValue(currentRecord, schema, config.getProps());
-              if (combineResult.isPresent()) {
-                GenericRecord avroRecord = buildAvroRecordBySchema(combineResult.get(), schema, requiredPos, recordBuilder);
-                readBuffer.add(filterOutVariables(avroRecord));
-              }
-            } else {
-              readBuffer.add(filterOutVariables(currentRecord));
-            }
-            currentRecord = reader.read();
-          }
-        }
-        // read the remaining log data.
-        if (scanner != null) {
-          for (String curKey : scanner.getRecords().keySet()) {
-            if (!keyToSkip.contains(curKey)) {
-              Option<GenericRecord> record = (Option<GenericRecord>) ((HoodieAvroRecord) scanner.getRecords()
-                      .get(curKey)).getData()
-                      .getInsertValue(schema, config.getProps());
-              if (record.isPresent()) {
-                readBuffer.add(filterOutVariables(record.get()));
-              }
-            }
+        try (ClosableIterator<RowData> rowIterator = getRecordIterator(fileSlice, schema, metaClient, config)) {
+          while (rowIterator.hasNext()) {
+            RowData rowData = rowIterator.next();
+            readBuffer.add(filterOutVariables(schema, rowData));
           }
         }
       }
@@ -980,27 +1005,30 @@ public class TestData {
   }
 
   /**
-   * Returns the scanner to read avro log files.
+   * Filter out the variables like _hoodie_record_key and _hoodie_partition_path.
+   *
+   * @param genericRecord data record
+   * @return field values joined with comma
    */
-  private static HoodieMergedLogRecordScanner getScanner(
-      HoodieStorage storage,
-      String basePath,
-      List<String> logPaths,
-      Schema readSchema,
-      String instant) {
-    return HoodieMergedLogRecordScanner.newBuilder()
-        .withStorage(storage)
-        .withBasePath(basePath)
-        .withLogFilePaths(logPaths)
-        .withReaderSchema(readSchema)
-        .withLatestInstantTime(instant)
-        .withReverseReader(false)
-        .withBufferSize(16 * 1024 * 1024)
-        .withMaxMemorySizeInBytes(1024 * 1024L)
-        .withSpillableMapBasePath("/tmp/")
-        .withDiskMapType(HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE.defaultValue())
-        .withBitCaskDiskMapCompressionEnabled(HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue())
-        .build();
+  public static String filterOutVariablesWithoutHudiMetadata(GenericRecord genericRecord) {
+    List<String> fields = new ArrayList<>();
+    fields.add(getFieldValue(genericRecord, "uuid"));
+    fields.add(getFieldValue(genericRecord, "name"));
+    fields.add(getFieldValue(genericRecord, "age"));
+    fields.add(TimestampData.fromEpochMillis((long) genericRecord.get("ts")).toTimestamp().toString());
+    fields.add(genericRecord.get("partition").toString());
+    return String.join(",", fields);
+  }
+
+  private static ClosableIterator<RowData> getRecordIterator(
+      FileSlice fileSlice,
+      HoodieSchema tableSchema,
+      HoodieTableMetaClient metaClient,
+      HoodieWriteConfig writeConfig) throws IOException {
+    HoodieFileGroupReader<RowData> fileGroupReader =
+        FormatUtils.createFileGroupReader(metaClient, writeConfig, InternalSchemaManager.DISABLED, fileSlice, tableSchema, tableSchema,
+            fileSlice.getLatestInstantTime(), FlinkOptions.REALTIME_PAYLOAD_COMBINE, false, Collections.emptyList(), Option.empty());
+    return fileGroupReader.getClosableIterator();
   }
 
   /**
@@ -1016,6 +1044,23 @@ public class TestData {
     fields.add(genericRecord.get("ts").toString());
     fields.add(genericRecord.get("partition").toString());
     return String.join(",", fields);
+  }
+
+  private static String filterOutVariables(HoodieSchema schema, RowData record) {
+    RowDataQueryContexts.RowDataQueryContext queryContext = RowDataQueryContexts.fromSchema(schema);
+    List<String> fields = new ArrayList<>();
+    fields.add(getFieldValue(queryContext, record, "_hoodie_record_key"));
+    fields.add(getFieldValue(queryContext, record, "_hoodie_partition_path"));
+    fields.add(getFieldValue(queryContext, record, "uuid"));
+    fields.add(getFieldValue(queryContext, record, "name"));
+    fields.add(getFieldValue(queryContext, record, "age"));
+    fields.add(getFieldValue(queryContext, record, "ts"));
+    fields.add(getFieldValue(queryContext, record, "partition"));
+    return String.join(",", fields);
+  }
+
+  private static String getFieldValue(RowDataQueryContexts.RowDataQueryContext queryContext, RowData rowData, String fieldName) {
+    return String.valueOf(queryContext.getFieldQueryContext(fieldName).getValAsJava(rowData, true));
   }
 
   private static String getFieldValue(GenericRecord genericRecord, String fieldName) {

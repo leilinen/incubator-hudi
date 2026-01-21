@@ -25,7 +25,6 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.CompactionUtils;
@@ -36,26 +35,20 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCompactionException;
 import org.apache.hudi.internal.schema.utils.SerDeHelper;
 import org.apache.hudi.metrics.HoodieMetrics;
-import org.apache.hudi.table.HoodieCompactionHandler;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.BaseActionExecutor;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.List;
+import lombok.extern.slf4j.Slf4j;
 
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 
+@Slf4j
 @SuppressWarnings("checkstyle:LineLength")
 public class RunCompactionActionExecutor<T> extends
     BaseActionExecutor<T, HoodieData<HoodieRecord<T>>, HoodieData<HoodieKey>, HoodieData<WriteStatus>, HoodieWriteMetadata<HoodieData<WriteStatus>>> {
 
-  private static final Logger LOG = LoggerFactory.getLogger(RunCompactionActionExecutor.class);
-
   private final HoodieCompactor compactor;
-  private final HoodieCompactionHandler compactionHandler;
   private final WriteOperationType operationType;
 
   private final HoodieMetrics metrics;
@@ -65,11 +58,9 @@ public class RunCompactionActionExecutor<T> extends
                                      HoodieTable table,
                                      String instantTime,
                                      HoodieCompactor compactor,
-                                     HoodieCompactionHandler compactionHandler,
                                      WriteOperationType operationType) {
     super(context, config, table, instantTime);
     this.compactor = compactor;
-    this.compactionHandler = compactionHandler;
     this.operationType = operationType;
     checkArgument(operationType == WriteOperationType.COMPACT || operationType == WriteOperationType.LOG_COMPACT,
         "Only COMPACT and LOG_COMPACT is supported");
@@ -78,7 +69,7 @@ public class RunCompactionActionExecutor<T> extends
 
   @Override
   public HoodieWriteMetadata<HoodieData<WriteStatus>> execute() {
-    LOG.info("Compaction requested. Instant time: {}.", instantTime);
+    log.info("Compaction requested. Instant time: {}.", instantTime);
     metrics.emitCompactionRequested();
 
     HoodieTimeline pendingMajorOrMinorCompactionTimeline = WriteOperationType.COMPACT.equals(operationType)
@@ -86,7 +77,7 @@ public class RunCompactionActionExecutor<T> extends
         : table.getActiveTimeline().filterPendingLogCompactionTimeline();
     compactor.preCompact(table, pendingMajorOrMinorCompactionTimeline, this.operationType, instantTime);
 
-    HoodieWriteMetadata<HoodieData<WriteStatus>> compactionMetadata = new HoodieWriteMetadata<>();
+    HoodieWriteMetadata<HoodieData<WriteStatus>> compactionWriteMetadata = new HoodieWriteMetadata<>();
     try {
       // generate compaction plan
       // should support configurable commit metadata
@@ -106,32 +97,25 @@ public class RunCompactionActionExecutor<T> extends
       }
 
       HoodieData<WriteStatus> statuses = compactor.compact(
-          context, operationType, compactionPlan, table, configCopy, instantTime, compactionHandler);
+          context, operationType, compactionPlan, table, configCopy, instantTime);
 
       compactor.maybePersist(statuses, context, config, instantTime);
       context.setJobStatus(this.getClass().getSimpleName(), "Preparing compaction metadata: " + config.getTableName());
-      List<HoodieWriteStat> updateStatusMap = statuses.map(WriteStatus::getStat).collectAsList();
-      HoodieCommitMetadata metadata = new HoodieCommitMetadata(true);
-      for (HoodieWriteStat stat : updateStatusMap) {
-        metadata.addWriteStat(stat.getPartitionPath(), stat);
-      }
+
+      HoodieCommitMetadata metadata = new HoodieCommitMetadata(false);
       metadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, config.getSchema());
       if (schemaPair.getLeft().isPresent()) {
         metadata.addMetadata(SerDeHelper.LATEST_SCHEMA, schemaPair.getLeft().get());
         metadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, schemaPair.getRight().get());
       }
-      // Setting operationType, which is compact.
       metadata.setOperationType(operationType);
-      compactionMetadata.setWriteStatuses(statuses);
-      compactionMetadata.setCommitted(false);
-      compactionMetadata.setCommitMetadata(Option.of(metadata));
-      compactionMetadata.setWriteStats(updateStatusMap);
+      compactionWriteMetadata.setCommitMetadata(Option.of(metadata));
+      compactionWriteMetadata.setWriteStatuses(statuses);
+      compactionWriteMetadata.setCommitted(false);
     } catch (Exception e) {
       throw new HoodieCompactionException("Could not compact " + config.getBasePath(), e);
     }
 
-    LOG.info("Compaction completed. Instant time: {}.", instantTime);
-    metrics.emitCompactionCompleted();
-    return compactionMetadata;
+    return compactionWriteMetadata;
   }
 }

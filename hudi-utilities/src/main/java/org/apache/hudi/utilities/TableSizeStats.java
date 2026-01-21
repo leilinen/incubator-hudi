@@ -34,7 +34,7 @@ import org.apache.hudi.exception.TableNotFoundException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.storage.StorageConfiguration;
-import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -237,9 +237,9 @@ public class TableSizeStats implements Serializable {
       TableSizeStats tableSizeStats = new TableSizeStats(jsc, cfg);
       tableSizeStats.run();
     } catch (TableNotFoundException e) {
-      LOG.warn(String.format("The Hudi data table is not found: [%s].", cfg.basePath), e);
+      LOG.warn("The Hudi data table is not found: [{}].", cfg.basePath, e);
     } catch (Throwable throwable) {
-      LOG.error("Failed to get table size stats for " + cfg, throwable);
+      LOG.error("Failed to get table size stats for {}", cfg, throwable);
     } finally {
       jsc.stop();
     }
@@ -272,14 +272,17 @@ public class TableSizeStats implements Serializable {
 
   private void logTableStats(String basePath, LocalDate[] dateInterval) throws IOException {
 
-    LOG.warn("Processing table " + basePath);
+    LOG.info("Processing table {}", basePath);
     HoodieMetadataConfig metadataConfig = HoodieMetadataConfig.newBuilder()
         .enable(isMetadataEnabled(basePath, jsc))
         .build();
     HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
     StorageConfiguration<?> storageConf = HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration());
-    HoodieTableMetadata tableMetadata = HoodieTableMetadata.create(
-        engineContext, new HoodieHadoopStorage(basePath, storageConf), metadataConfig, basePath);
+    HoodieTableMetaClient metaClientLocal = HoodieTableMetaClient.builder()
+        .setBasePath(basePath)
+        .setConf(storageConf.newInstance()).build();
+    HoodieTableMetadata tableMetadata = metaClientLocal.getTableFormat().getMetadataFactory().create(
+        engineContext, HoodieStorageUtils.getStorage(basePath, storageConf), metadataConfig, basePath);
 
     List<String> allPartitions = tableMetadata.getAllPartitionPaths();
 
@@ -313,9 +316,6 @@ public class TableSizeStats implements Serializable {
           || (endDate == null && (partitionDate.isEqual(startDate) || partitionDate.isAfter(startDate)))
           || (startDate == null && partitionDate.isBefore(endDate))
           || (startDate != null && endDate != null && ((partitionDate.isEqual(startDate) || partitionDate.isAfter(startDate)) && partitionDate.isBefore(endDate)))) {
-        HoodieTableMetaClient metaClientLocal = HoodieTableMetaClient.builder()
-            .setBasePath(basePath)
-            .setConf(storageConf.newInstance()).build();
         HoodieMetadataConfig metadataConfig1 = HoodieMetadataConfig.newBuilder()
             .enable(false)
             .build();

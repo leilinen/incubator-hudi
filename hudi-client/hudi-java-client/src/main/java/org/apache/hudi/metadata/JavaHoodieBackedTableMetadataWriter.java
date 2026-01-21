@@ -20,12 +20,16 @@ package org.apache.hudi.metadata;
 
 import org.apache.hudi.client.BaseHoodieWriteClient;
 import org.apache.hudi.client.HoodieJavaWriteClient;
+import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.data.HoodieData;
+import org.apache.hudi.common.data.HoodieListData;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
+import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieIndexDefinition;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.util.Option;
@@ -33,10 +37,7 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.storage.StorageConfiguration;
-import org.apache.hudi.table.HoodieJavaTable;
-import org.apache.hudi.table.HoodieTable;
-
-import org.apache.avro.Schema;
+import org.apache.hudi.table.BulkInsertPartitioner;
 
 import java.util.Collections;
 import java.util.List;
@@ -44,7 +45,7 @@ import java.util.Map;
 
 import static org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy.EAGER;
 
-public class JavaHoodieBackedTableMetadataWriter extends HoodieBackedTableMetadataWriter<List<HoodieRecord>> {
+public class JavaHoodieBackedTableMetadataWriter extends HoodieBackedTableMetadataWriter<List<HoodieRecord>, List<WriteStatus>> {
 
   /**
    * Hudi backed table metadata writer.
@@ -59,11 +60,6 @@ public class JavaHoodieBackedTableMetadataWriter extends HoodieBackedTableMetada
                                                 HoodieEngineContext engineContext,
                                                 Option<String> inflightInstantTimestamp) {
     super(storageConf, writeConfig, failedWritesCleaningPolicy, engineContext, inflightInstantTimestamp);
-  }
-
-  @Override
-  HoodieTable getTable(HoodieWriteConfig writeConfig, HoodieTableMetaClient metaClient) {
-    return HoodieJavaTable.create(writeConfig, engineContext, metaClient);
   }
 
   public static HoodieTableMetadataWriter create(StorageConfiguration<?> conf,
@@ -108,12 +104,36 @@ public class JavaHoodieBackedTableMetadataWriter extends HoodieBackedTableMetada
   }
 
   @Override
-  protected void bulkCommit(String instantTime, String partitionName, HoodieData<HoodieRecord> records, int fileGroupCount) {
-    commitInternal(instantTime, Collections.singletonMap(partitionName, records), true, Option.of(new JavaHoodieMetadataBulkInsertPartitioner()));
+  protected HoodieData<WriteStatus> convertEngineSpecificDataToHoodieData(List<WriteStatus> records) {
+    return HoodieListData.lazy(records);
   }
 
   @Override
-  protected BaseHoodieWriteClient<?, List<HoodieRecord>, ?, ?> initializeWriteClient() {
+  protected void bulkCommit(String instantTime, String partitionPath, HoodieData<HoodieRecord> records, MetadataTableFileGroupIndexParser indexParser) {
+    commitInternal(instantTime, Collections.singletonMap(partitionPath, records), true, Option.of(new JavaHoodieMetadataBulkInsertPartitioner()));
+  }
+
+  @Override
+  protected void bulkInsertAndCommit(BaseHoodieWriteClient<?, List<HoodieRecord>, ?, List<WriteStatus>> writeClient, String instantTime, List<HoodieRecord> preppedRecordInputs,
+                                     Option<BulkInsertPartitioner> bulkInsertPartitioner) {
+    List<WriteStatus> writeStatusJavaRDD = writeClient.bulkInsertPreppedRecords(preppedRecordInputs, instantTime, bulkInsertPartitioner);
+    writeClient.commit(instantTime, writeStatusJavaRDD);
+  }
+
+  @Override
+  protected void upsertAndCommit(BaseHoodieWriteClient<?, List<HoodieRecord>, ?, List<WriteStatus>> writeClient, String instantTime, List<HoodieRecord> preppedRecordInputs) {
+    List<WriteStatus> writeStatusJavaRDD = writeClient.upsertPreppedRecords(preppedRecordInputs, instantTime);
+    writeClient.commit(instantTime, writeStatusJavaRDD);
+  }
+
+  @Override
+  protected void upsertAndCommit(BaseHoodieWriteClient<?, List<HoodieRecord>, ?, List<WriteStatus>> writeClient, String instantTime, List<HoodieRecord> preppedRecordInputs,
+                                 List<HoodieFileGroupId> fileGroupsIdsToUpdate) {
+    throw new UnsupportedOperationException("Not implemented for Java engine yet");
+  }
+
+  @Override
+  protected BaseHoodieWriteClient<?, List<HoodieRecord>, ?, List<WriteStatus>> initializeWriteClient() {
     return new HoodieJavaWriteClient(engineContext, metadataWriteConfig);
   }
 
@@ -129,8 +149,8 @@ public class JavaHoodieBackedTableMetadataWriter extends HoodieBackedTableMetada
 
   @Override
   protected HoodieData<HoodieRecord> getExpressionIndexRecords(List<Pair<String, Pair<String, Long>>> partitionFilePathAndSizeTriplet, HoodieIndexDefinition indexDefinition,
-                                                               HoodieTableMetaClient metaClient, int parallelism, Schema readerSchema, StorageConfiguration<?> storageConf,
-                                                               String instantTime) {
+                                                               HoodieTableMetaClient metaClient, int parallelism, HoodieSchema tableSchema, HoodieSchema readerSchema,
+                                                               StorageConfiguration<?> storageConf, String instantTime) {
     throw new HoodieNotSupportedException("Expression index not supported for Java metadata table writer yet.");
   }
 

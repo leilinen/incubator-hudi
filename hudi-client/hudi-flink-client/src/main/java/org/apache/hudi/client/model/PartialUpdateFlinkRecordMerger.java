@@ -20,13 +20,12 @@
 package org.apache.hudi.client.model;
 
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.ValidationUtils;
-import org.apache.hudi.common.util.collection.Pair;
-import org.apache.hudi.util.RowDataAvroQueryContexts;
+import org.apache.hudi.common.engine.RecordContext;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.table.read.BufferedRecord;
+import org.apache.hudi.common.table.read.BufferedRecords;
+import org.apache.hudi.util.RowDataQueryContexts;
 
-import org.apache.avro.Schema;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 
@@ -80,73 +79,84 @@ import java.io.IOException;
  * </pre>
  */
 public class PartialUpdateFlinkRecordMerger extends HoodieFlinkRecordMerger {
+
   @Override
   public String getMergingStrategy() {
-    return CUSTOM_MERGE_STRATEGY_UUID;
+    return EVENT_TIME_BASED_MERGE_STRATEGY_UUID;
   }
 
   @Override
-  public Option<Pair<HoodieRecord, Schema>> merge(
-      HoodieRecord older,
-      Schema oldSchema,
-      HoodieRecord newer,
-      Schema newSchema,
+  public <T> BufferedRecord<T> merge(
+      BufferedRecord<T> older,
+      BufferedRecord<T> newer,
+      RecordContext<T> recordContext,
       TypedProperties props) throws IOException {
-    // Note: can be removed if we can ensure the type from invoker.
-    ValidationUtils.checkArgument(older.getRecordType() == HoodieRecord.HoodieRecordType.FLINK);
-    ValidationUtils.checkArgument(newer.getRecordType() == HoodieRecord.HoodieRecordType.FLINK);
-
-    if (older.getOrderingValue(oldSchema, props).compareTo(newer.getOrderingValue(newSchema, props)) > 0) {
-      if (older.isDelete(oldSchema, props)) {
-        // Delete record
-        return Option.empty();
-      } else if (newer.isDelete(newSchema, props)) {
-        // return old directly, if newer is delete
-        return Option.of(Pair.of(older, oldSchema));
+    if (older.getOrderingValue().compareTo(newer.getOrderingValue()) > 0) {
+      if (older.isDelete() || newer.isDelete()) {
+        return older;
       } else {
-        HoodieRecord mergedRecord = mergeRecord(newer, newSchema, older, oldSchema, props);
-        return Option.of(Pair.of(mergedRecord, oldSchema));
+        HoodieSchema oldSchema = recordContext.getSchemaFromBufferRecord(older);
+        HoodieSchema newSchema = recordContext.getSchemaFromBufferRecord(newer);
+        return mergeRecord(newer, newSchema, older, oldSchema, newSchema, recordContext, props);
       }
     } else {
-      if (newer.isDelete(newSchema, props)) {
-        // Delete record
-        return Option.empty();
-      } else if (older.isDelete(oldSchema, props)) {
-        return Option.of(Pair.of(newer, newSchema));
+      if (newer.isDelete() || older.isDelete()) {
+        return newer;
       } else {
-        HoodieRecord mergedRecord = mergeRecord(older, oldSchema, newer, newSchema, props);
-        return Option.of(Pair.of(mergedRecord, oldSchema));
+        HoodieSchema oldSchema = recordContext.getSchemaFromBufferRecord(older);
+        HoodieSchema newSchema = recordContext.getSchemaFromBufferRecord(newer);
+        return mergeRecord(older, oldSchema, newer, newSchema, newSchema, recordContext, props);
       }
     }
   }
 
-  private HoodieRecord mergeRecord(
-      HoodieRecord lowOrderRecord,
-      Schema lowOrderSchema,
-      HoodieRecord highOrderRecord,
-      Schema highOrderSchema,
+  private <T> BufferedRecord<T> mergeRecord(
+      BufferedRecord<T> lowOrderRecord,
+      HoodieSchema lowOrderSchema,
+      BufferedRecord<T> highOrderRecord,
+      HoodieSchema highOrderSchema,
+      HoodieSchema newSchema,
+      RecordContext<T> recordContext,
       TypedProperties props) {
-    // merge older and newer, currently assume there is no schema evolution, solve it in HUDI-9253
-    ValidationUtils.checkArgument(lowOrderSchema.getFields().size() == highOrderSchema.getFields().size());
-    RowData mergedRow = mergeRowData((RowData) lowOrderRecord.getData(), (RowData) highOrderRecord.getData(), highOrderSchema, props);
-    return new HoodieFlinkRecord(
-        highOrderRecord.getKey(),
-        highOrderRecord.getOperation(),
-        highOrderRecord.getOrderingValue(highOrderSchema, props),
-        mergedRow);
-  }
-
-  private RowData mergeRowData(RowData lowOrderRow, RowData highOrderRow, Schema schema, TypedProperties props) {
+    // Assumptions: there is no schema evolution, will solve it in HUDI-9253
+    // 1. schema differences are ONLY due to meta fields;
+    // 2. meta fields are consecutive and in the same order;
+    // 3. meta fields start from index 0 if exists.
+    int lowOrderArity = lowOrderSchema.getFields().size();
+    int highOrderArity = highOrderSchema.getFields().size();
+    // Merged record is always created with new schema, which may not contain metadata fields.
+    // The merged record has no metadata fields for this case, and metadata fields will be prepended
+    // later in the file writer.
+    int mergedArity = newSchema.getFields().size();
     boolean utcTimezone = Boolean.parseBoolean(props.getProperty("read.utc-timezone", "true"));
-    GenericRowData result = new GenericRowData(schema.getFields().size());
-    RowData.FieldGetter[] fieldGetters = RowDataAvroQueryContexts.fromAvroSchema(schema, utcTimezone).fieldGetters();
-    for (int i = 0; i < fieldGetters.length; i++) {
-      result.setField(i, fieldGetters[i].getFieldOrNull(lowOrderRow));
-      Object fieldValWithHighOrder = fieldGetters[i].getFieldOrNull(highOrderRow);
-      if (fieldValWithHighOrder != null) {
-        result.setField(i, fieldValWithHighOrder);
-      }
+    RowData.FieldGetter[] fieldGetters = RowDataQueryContexts.fromSchema(newSchema, utcTimezone).fieldGetters();
+
+    int lowOrderIdx = 0;
+    int highOrderIdx = 0;
+    RowData.FieldGetter[] lowOrderFieldGetters = fieldGetters;
+    RowData.FieldGetter[] highOrderFieldGetters = fieldGetters;
+    // shift start index for merging if there is schema discrepancy
+    if (lowOrderArity != mergedArity) {
+      lowOrderIdx += lowOrderArity - mergedArity;
+      lowOrderFieldGetters = RowDataQueryContexts.fromSchema(lowOrderSchema, utcTimezone).fieldGetters();
+    } else if (highOrderArity != mergedArity) {
+      highOrderIdx += highOrderArity - mergedArity;
+      highOrderFieldGetters = RowDataQueryContexts.fromSchema(highOrderSchema, utcTimezone).fieldGetters();
     }
-    return result;
+
+    RowData lowOrderRow = (RowData) lowOrderRecord.getRecord();
+    RowData highOrderRow = (RowData) highOrderRecord.getRecord();
+    GenericRowData mergedRow = new GenericRowData(mergedArity);
+    for (int i = 0; i < mergedArity; i++) {
+      Object fieldValWithHighOrder = highOrderFieldGetters[highOrderIdx].getFieldOrNull(highOrderRow);
+      if (fieldValWithHighOrder != null) {
+        mergedRow.setField(i, fieldValWithHighOrder);
+      } else {
+        mergedRow.setField(i, lowOrderFieldGetters[lowOrderIdx].getFieldOrNull(lowOrderRow));
+      }
+      lowOrderIdx++;
+      highOrderIdx++;
+    }
+    return BufferedRecords.fromEngineRecord((T) mergedRow, newSchema, recordContext, highOrderRecord.getOrderingValue(), highOrderRecord.getRecordKey(), highOrderRecord.isDelete());
   }
 }

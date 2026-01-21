@@ -20,7 +20,6 @@ package org.apache.hudi.common.table.log.block;
 
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.table.HoodieTableVersion;
-import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.table.log.LogReaderUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.TypeUtils;
@@ -177,7 +176,7 @@ public abstract class HoodieLogBlock {
   }
 
   protected void removeBaseFileInstantTimeOfPositions() {
-    LOG.warn("There are records without valid positions. "
+    LOG.info("There are records without valid positions. "
         + "Skip writing record positions to the block header.");
     logBlockHeader.remove(HeaderMetadataType.BASE_FILE_INSTANT_TIME_OF_RECORD_POSITIONS);
   }
@@ -328,7 +327,7 @@ public abstract class HoodieLogBlock {
 
   /**
    * Read or Skip block content of a log block in the log file. Depends on lazy reading enabled in
-   * {@link HoodieMergedLogRecordScanner}
+   * {@link org.apache.hudi.common.table.log.HoodieMergedLogRecordReader}
    */
   public static Option<byte[]> tryReadContent(SeekableDataInputStream inputStream, Integer contentLength, boolean readLazily)
       throws IOException {

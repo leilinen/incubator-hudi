@@ -28,30 +28,28 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaPairRDD;
 import org.apache.hudi.execution.bulkinsert.BucketIndexBulkInsertPartitionerWithRows;
 import org.apache.hudi.table.BulkInsertPartitioner;
+
+import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 public class DatasetBucketRescaleCommitActionExecutor extends DatasetBulkInsertOverwriteCommitActionExecutor {
 
   private static final long serialVersionUID = 1L;
-
-  private static final Logger LOG = LoggerFactory.getLogger(DatasetBucketRescaleCommitActionExecutor.class);
-  private final PartitionBucketIndexHashingConfig hashingConfig;
+  private final String expression;
+  private final String rule;
+  private final int bucketNumber;
 
   public DatasetBucketRescaleCommitActionExecutor(HoodieWriteConfig config,
-                                                  SparkRDDWriteClient writeClient,
-                                                  String instantTime) {
+                                                  SparkRDDWriteClient writeClient, String instantTime) {
     super(config, writeClient, instantTime);
-    String expression = config.getBucketIndexPartitionExpression();
-    String rule = config.getBucketIndexPartitionRuleType();
-    int bucketNumber = config.getBucketIndexNumBuckets();
-    this.hashingConfig = new PartitionBucketIndexHashingConfig(expression,
-        bucketNumber, rule, PartitionBucketIndexHashingConfig.CURRENT_VERSION, instantTime);
+    expression = config.getBucketIndexPartitionExpression();
+    rule = config.getBucketIndexPartitionRuleType();
+    bucketNumber = config.getBucketIndexNumBuckets();
   }
 
   /**
@@ -59,19 +57,20 @@ public class DatasetBucketRescaleCommitActionExecutor extends DatasetBulkInsertO
    */
   @Override
   protected BulkInsertPartitioner<Dataset<Row>> getPartitioner(boolean populateMetaFields, boolean isTablePartitioned) {
-    return new BucketIndexBulkInsertPartitionerWithRows(writeConfig.getBucketIndexHashFieldWithDefault(), hashingConfig);
+    return new BucketIndexBulkInsertPartitionerWithRows(writeClient.getConfig(), expression, rule, bucketNumber);
   }
 
   /**
    * create new hashing_config during afterExecute and before commit finished.
-   * @param result
    */
   @Override
   protected void preExecute() {
     super.preExecute();
+    PartitionBucketIndexHashingConfig hashingConfig = new PartitionBucketIndexHashingConfig(expression,
+        bucketNumber, rule, PartitionBucketIndexHashingConfig.CURRENT_VERSION, instantTime);
     boolean res = PartitionBucketIndexHashingConfig.saveHashingConfig(hashingConfig, table.getMetaClient());
     ValidationUtils.checkArgument(res);
-    LOG.info("Finish to save hashing config " + hashingConfig);
+    log.info("Finish to save hashing config {}", hashingConfig);
   }
 
   @Override

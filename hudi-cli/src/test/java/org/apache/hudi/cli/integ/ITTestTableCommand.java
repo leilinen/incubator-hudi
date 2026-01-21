@@ -40,11 +40,10 @@ import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.storage.StoragePath;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.shell.Shell;
@@ -62,9 +61,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * A command use SparkLauncher need load jars under lib which generate during mvn package.
  * Use integration test instead of unit test.
  */
+@Slf4j
 @SpringBootTest(properties = {"spring.shell.interactive.enabled=false", "spring.shell.command.script.enabled=false"})
 public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
-  private static final Logger LOG = LoggerFactory.getLogger(ITTestTableCommand.class);
 
   @Autowired
   private Shell shell;
@@ -125,7 +124,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     generateCommits();
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW");
 
-    LOG.info("change to cow result \n{}", result);
+    log.info("change to cow result \n{}", result);
     assertEquals(String.class, result.getClass());
     assertTrue(((String) result).matches("(?s).*║ hoodie.table.type +│ MERGE_ON_READ +│ COPY_ON_WRITE +║.*"));
     // table change to cow type successfully
@@ -147,7 +146,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     generateCommits();
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW");
 
-    LOG.info("change to cow result \n{}", result);
+    log.info("change to cow result \n{}", result);
     assertEquals(String.class, result.getClass());
     assertTrue(((String) result).matches("(?s).*║ hoodie.table.type +│ MERGE_ON_READ +│ COPY_ON_WRITE +║.*"));
     // table change to cow type successfully
@@ -172,7 +171,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     generateCommits();
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW --enable-compaction false");
 
-    LOG.info("change to cow result \n{}", result);
+    log.info("change to cow result \n{}", result);
     assertEquals(HoodieException.class, result.getClass());
     assertTrue(((HoodieException) result).getMessage().startsWith("The last action must be a completed compaction"));
     // table change to cow type failed
@@ -191,11 +190,11 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(HoodieIndex.IndexType.BLOOM).build()).build();
 
     try (SparkRDDWriteClient<HoodieAvroPayload> client = new SparkRDDWriteClient<>(new HoodieSparkEngineContext(jsc), cfg)) {
-      String instantTime = client.createNewInstantTime();
+      String instantTime = client.startCommit();
       List<HoodieRecord> records = dataGen.generateInserts(instantTime, 2);
       upsert(jsc, client, records, instantTime);
 
-      instantTime = client.createNewInstantTime();
+      instantTime = client.startCommit();
       List<HoodieRecord> recordsToUpdate = dataGen.generateUpdates(instantTime, 2);
       records.addAll(recordsToUpdate);
       upsert(jsc, client, records, instantTime);
@@ -204,15 +203,15 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
 
   private void upsert(JavaSparkContext jsc, SparkRDDWriteClient<HoodieAvroPayload> client,
                       List<HoodieRecord> records, String newCommitTime) throws IOException {
-    client.startCommitWithTime(newCommitTime);
     JavaRDD<HoodieRecord> writeRecords = jsc.parallelize(records, 1);
-    operateFunc(SparkRDDWriteClient::upsert, client, writeRecords, newCommitTime);
+    JavaRDD<WriteStatus> result = operateFunc(SparkRDDWriteClient::upsert, client, writeRecords, newCommitTime);
+    client.commit(newCommitTime, result);
   }
 
-  private void operateFunc(
+  private JavaRDD<WriteStatus> operateFunc(
       Function3<JavaRDD<WriteStatus>, SparkRDDWriteClient, JavaRDD<HoodieRecord>, String> writeFn,
       SparkRDDWriteClient<HoodieAvroPayload> client, JavaRDD<HoodieRecord> writeRecords, String commitTime)
       throws IOException {
-    writeFn.apply(client, writeRecords, commitTime);
+    return writeFn.apply(client, writeRecords, commitTime);
   }
 }

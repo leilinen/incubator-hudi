@@ -234,7 +234,7 @@ public class HoodieMultiTableStreamer {
       tableConfig.enableMetaSync = globalConfig.enableMetaSync;
       tableConfig.syncClientToolClassNames = globalConfig.syncClientToolClassNames;
       tableConfig.schemaProviderClassName = globalConfig.schemaProviderClassName;
-      tableConfig.sourceOrderingField = globalConfig.sourceOrderingField;
+      tableConfig.sourceOrderingFields = globalConfig.sourceOrderingField;
       tableConfig.sourceClassName = globalConfig.sourceClassName;
       tableConfig.tableType = globalConfig.tableType;
       tableConfig.targetTableName = globalConfig.targetTableName;
@@ -275,8 +275,8 @@ public class HoodieMultiTableStreamer {
     }
 
     if (config.targetTableName != null) {
-      LOG.warn(String.format("--target-table is deprecated and will be removed in a future release due to it's useless;"
-          + " please use %s to configure multiple target tables", HoodieStreamerConfig.TABLES_TO_BE_INGESTED.key()));
+      LOG.warn("--target-table is deprecated and will be removed in a future release due to it's useless;"
+          + " please use {} to configure multiple target tables", HoodieStreamerConfig.TABLES_TO_BE_INGESTED.key());
     }
 
     JavaSparkContext jssc = UtilHelpers.buildSparkContext("multi-table-streamer", Constants.LOCAL_SPARK_MASTER);
@@ -459,12 +459,19 @@ public class HoodieMultiTableStreamer {
    */
   public void sync() {
     for (TableExecutionContext context : tableExecutionContexts) {
+      HoodieStreamer streamer = null;
       try {
-        new HoodieStreamer(context.getConfig(), jssc, Option.ofNullable(context.getProperties())).sync();
+        streamer = new HoodieStreamer(context.getConfig(), jssc, Option.ofNullable(context.getProperties()));
+        streamer.sync();
         successTables.add(Helpers.getTableWithDatabase(context));
+        streamer.shutdownGracefully();
       } catch (Exception e) {
         LOG.error("error while running MultiTableDeltaStreamer for table: " + context.getTableName(), e);
         failedTables.add(Helpers.getTableWithDatabase(context));
+      } finally {
+        if (streamer != null) {
+          streamer.shutdownGracefully();
+        }
       }
     }
 

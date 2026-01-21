@@ -19,21 +19,22 @@
 package org.apache.hudi.client.functional;
 
 import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.fs.ConsistencyGuardConfig;
-import org.apache.hudi.common.model.HoodieAvroRecord;
+import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
-import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCleanConfig;
@@ -46,7 +47,7 @@ import org.apache.hudi.testutils.HoodieClientTestBase;
 import org.apache.hudi.testutils.HoodieSparkWriteableTestTable;
 import org.apache.hudi.testutils.MetadataMergeWriteStatus;
 
-import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.api.java.JavaRDD;
 import org.junit.jupiter.api.AfterEach;
@@ -177,7 +178,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     // Verify row count.
     assertEquals(mainRecordsMap.size(), experimentRecordsMap.size());
 
-    Schema readerSchema = new Schema.Parser().parse(mainTable.config.getSchema());
+    HoodieSchema readerSchema = HoodieSchema.parse(mainTable.config.getSchema());
     List<String> excludeFields = CollectionUtils.createImmutableList(COMMIT_TIME_METADATA_FIELD, COMMIT_SEQNO_METADATA_FIELD,
         FILENAME_METADATA_FIELD, OPERATION_METADATA_FIELD, RECORD_KEY_METADATA_FIELD);
 
@@ -196,8 +197,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
   }
 
   private boolean writeOnMainTable(TestTableContents mainTable, int curr) throws IOException {
-    String commitTime = mainTable.client.createNewInstantTime();
-    mainTable.client.startCommitWithTime(commitTime);
+    String commitTime = mainTable.client.startCommit();
 
     int actionType = pickAWriteAction();
     JavaRDD<WriteStatus> result;
@@ -234,7 +234,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
 
   private void writeOnExperimentTable(TestTableContents mainTable, TestTableContents experimentTable) throws IOException {
     String commitTime = mainTable.commitTimeOnMainTable;
-    experimentTable.client.startCommitWithTime(commitTime);
+    WriteClientTestUtils.startCommitWithTime(experimentTable.client, commitTime);
     int actionType = mainTable.previousActionType;
     JavaRDD<WriteStatus> result;
     if (actionType == 0) {
@@ -321,16 +321,16 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     }
 
     private void updatePreviousGeneration(List<HoodieRecord> generatedRecords, String commitTimeOnMainTable, int previousActionType) {
-      Schema schema = new Schema.Parser().parse(this.config.getSchema());
-      this.generatedRecords = generatedRecords.stream().map(rec -> deepCopyAndModifyRecordKey(rec)).collect(Collectors.toList());
+      this.generatedRecords = generatedRecords.stream().map(this::deepCopyAndModifyRecordKey).collect(Collectors.toList());
       this.commitTimeOnMainTable = commitTimeOnMainTable;
       this.previousActionType = previousActionType;
     }
 
     private HoodieRecord deepCopyAndModifyRecordKey(HoodieRecord record) {
       HoodieKey key = deepCopyAndModifyRecordKey(record.getKey());
-      RawTripTestPayload payload = ((RawTripTestPayload)record.getData()).clone();
-      return new HoodieAvroRecord(key, payload);
+      GenericRecord data = (GenericRecord) record.getData();
+      GenericRecord copiedData = GenericData.get().deepCopy(data.getSchema(), data);
+      return new HoodieAvroIndexedRecord(key, copiedData);
     }
 
     private HoodieKey deepCopyAndModifyRecordKey(HoodieKey key) {
@@ -349,7 +349,6 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     properties.setProperty("hoodie.parquet.small.file.limit", "0");
     HoodieWriteConfig config = getConfigBuilder(TRIP_EXAMPLE_SCHEMA, HoodieIndex.IndexType.INMEMORY)
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().withInlineCompaction(true).build())
-        .withAutoCommit(true)
         .withProperties(properties)
         .build();
     SparkRDDWriteClient client = new SparkRDDWriteClient(context, config);
@@ -368,7 +367,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
     HoodieWriteConfig config2 = getConfigBuilderForSecondTable(tableName2, basePath2,
         TRIP_EXAMPLE_SCHEMA, HoodieIndex.IndexType.INMEMORY)
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().withInlineCompaction(true).build())
-        .withAutoCommit(true).build();
+        .build();
 
     // Create writeClient
     SparkRDDWriteClient client2 = new SparkRDDWriteClient(context, config2);

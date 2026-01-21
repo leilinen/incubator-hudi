@@ -18,8 +18,9 @@
 
 package org.apache.hudi.io.storage.row;
 
+import org.apache.hudi.common.config.HoodieParquetConfig;
+import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.util.ValidationUtils;
-import org.apache.hudi.io.storage.HoodieParquetConfig;
 import org.apache.hudi.parquet.io.OutputStreamBackedOutputFile;
 
 import org.apache.flink.table.data.RowData;
@@ -63,7 +64,7 @@ public class HoodieRowDataParquetOutputStreamWriter implements HoodieRowDataFile
     parquetWriterbuilder.withRowGroupSize(parquetConfig.getBlockSize());
     parquetWriterbuilder.withPageSize(parquetConfig.getPageSize());
     parquetWriterbuilder.withDictionaryPageSize(parquetConfig.getPageSize());
-    parquetWriterbuilder.withDictionaryEncoding(parquetConfig.dictionaryEnabled());
+    parquetWriterbuilder.withDictionaryEncoding(parquetConfig.isDictionaryEnabled());
     parquetWriterbuilder.withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION);
     parquetWriterbuilder.withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class));
     this.writer = parquetWriterbuilder.build();
@@ -81,8 +82,8 @@ public class HoodieRowDataParquetOutputStreamWriter implements HoodieRowDataFile
   }
 
   @Override
-  public void writeRow(RowData row) throws IOException {
-    writer.write(row);
+  public void writeRowWithMetaData(HoodieKey key, RowData row) throws IOException {
+    writeRow(key.getRecordKey(), row);
   }
 
   @Override

@@ -21,21 +21,27 @@ import org.apache.hudi.BucketIndexSupport
 import org.apache.hudi.common.config.{HoodieMetadataConfig, TypedProperties}
 import org.apache.hudi.common.config.HoodieMetadataConfig.ENABLE
 import org.apache.hudi.common.fs.FSUtils
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.table.HoodieTableConfig
-import org.apache.hudi.config.HoodieIndexConfig
+import org.apache.hudi.common.table.view.{FileSystemViewManager, FileSystemViewStorageConfig}
+import org.apache.hudi.config.{HoodieIndexConfig, HoodieWriteConfig}
+import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.index.HoodieIndex
 import org.apache.hudi.index.bucket.BucketIdentifier
+import org.apache.hudi.index.bucket.partition.NumBucketsFunction
 import org.apache.hudi.keygen.{ComplexKeyGenerator, NonpartitionedKeyGenerator}
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
+import org.apache.hudi.timeline.service.TimelineService
 
-import org.apache.avro.Schema
 import org.apache.avro.generic.GenericData
-import org.apache.spark.sql.{HoodieCatalystExpressionUtils, SparkSession}
-import org.apache.spark.sql.catalyst.encoders.DummyExpressionHolder
-import org.apache.spark.sql.catalyst.expressions.PredicateHelper
+import org.apache.spark.sql.{BucketPartitionUtils, HoodieCatalystExpressionUtils, SparkSession}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, PredicateHelper}
+import org.apache.spark.sql.catalyst.plans.logical.LeafNode
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Tag, Test}
+
+import java.util
 
 @Tag("functional")
 class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHelper {
@@ -60,7 +66,7 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
       )
     )
 
-  val avroSchema = new Schema.Parser().parse(avroSchemaStr)
+  val schema = HoodieSchema.parse(avroSchemaStr)
 
   @BeforeEach
   override def setUp() {
@@ -76,6 +82,52 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
   @AfterEach
   override def tearDown() = {
     cleanupSparkContexts()
+  }
+
+  @Test
+  def testBucketIndexRemotePartitioner(): Unit = {
+    val numBuckets = 511
+    val config = HoodieWriteConfig.newBuilder
+      .withPath(basePath).
+      withIndexConfig(HoodieIndexConfig.newBuilder()
+        .withBucketNum(numBuckets.toString)
+        .enableBucketRemotePartitioner(true).build())
+      .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder
+        .withRemoteServerPort(incrementTimelineServicePortToUse).build)
+      .build
+
+    val timelineService = new TimelineService(HadoopFSUtils.getStorageConf,
+      TimelineService.Config.builder.enableMarkerRequests(true).enableRemotePartitioner(true)
+      .serverPort(config.getViewStorageConfig.getRemoteViewServerPort).build,
+      FileSystemViewManager.createViewManager(context, config.getMetadataConfig, config.getViewStorageConfig, config.getCommonConfig))
+
+    timelineService.startService
+    this.timelineService = timelineService
+
+    timelineService.startService()
+    val numBucketsFunction = NumBucketsFunction.fromWriteConfig(config)
+    val partitionNum = 1533
+    val partitioner = BucketPartitionUtils.getRemotePartitioner(config.getViewStorageConfig, numBucketsFunction, partitionNum)
+    val dataPartitions = List("dt=20250501", "dt=20250502", "dt=20250503", "dt=20250504", "dt=20250505", "dt=20250506")
+    val res = new util.HashMap[Int, Int]
+    dataPartitions.foreach(dataPartition => {
+      for (i <- 1 to numBuckets) {
+        // for bucket id from 1 to numBuckets
+        // mock 1000 spark partitions
+        val sparkPartition = partitioner.getPartition((dataPartition, i))
+        if (res.containsKey(sparkPartition)) {
+          val value = res.get(sparkPartition) + 1
+          res.put(sparkPartition, value)
+        } else {
+          res.put(sparkPartition, 1)
+        }
+      }
+    })
+    timelineService.close()
+
+    res.values().stream().forEach(value => {
+      assert(value == (numBuckets*dataPartitions.size/partitionNum))
+    })
   }
 
   @Test
@@ -96,19 +148,19 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
 
     // init
     val testKeyGenerator = new NonpartitionedKeyGenerator(configProperties)
-    var record = new GenericData.Record(avroSchema)
+    var record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "1")
     val bucket1Id4 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "2")
     val bucket2Id5 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "3")
     val bucket3Id6 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "4")
     val bucket4Id7 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "5")
     val bucket5Id8 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A", bucketNumber)
     assert(bucket1Id4 == 4 && bucket2Id5 == 5 && bucket3Id6 == 6 && bucket4Id7 == 7 && bucket5Id8 == 8)
@@ -211,23 +263,23 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
 
     // init
     val testKeyGenerator = new NonpartitionedKeyGenerator(configProperties)
-    var record = new GenericData.Record(avroSchema)
+    var record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "1")
     record.put("B", "2")
     val bucket1Id4 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "2")
     record.put("B", "3")
     val bucket2Id5 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "3")
     record.put("B", "4")
     val bucket3Id6 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "4")
     record.put("B", "5")
     val bucket4Id7 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "5")
     record.put("B", "6")
     val bucket5Id8 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
@@ -278,23 +330,23 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
 
     // init
     val testKeyGenerator = new ComplexKeyGenerator(configProperties)
-    var record = new GenericData.Record(avroSchema)
+    var record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "1")
     record.put("B", "2")
     val bucket1Id4 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "2")
     record.put("B", "3")
     val bucket2Id5 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "3")
     record.put("B", "4")
     val bucket3Id6 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "4")
     record.put("B", "5")
     val bucket4Id7 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
-    record = new GenericData.Record(avroSchema)
+    record = new GenericData.Record(schema.toAvroSchema)
     record.put("A", "5")
     record.put("B", "6")
     val bucket5Id8 = BucketIdentifier.getBucketId(testKeyGenerator.getKey(record).getRecordKey, "A,B", bucketNumber)
@@ -329,8 +381,9 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
 
   def exprBucketAnswerCheck(bucketIndexSupport: BucketIndexSupport, exprRaw: String, expectResult: List[Int], fallback: Boolean): Unit = {
     val resolveExpr = HoodieCatalystExpressionUtils.resolveExpr(spark, exprRaw, structSchema)
-    val optimizerPlan = spark.sessionState.optimizer.execute(DummyExpressionHolder(Seq(resolveExpr)))
-    val optimizerExpr = optimizerPlan.asInstanceOf[DummyExpressionHolder].exprs.head
+    val dummyExpressionHolder = HoodieDummyExpressionHolder(Seq(resolveExpr), resolveExpr.references.toSeq)
+    val optimizerPlan = spark.sessionState.optimizer.execute(dummyExpressionHolder)
+    val optimizerExpr = optimizerPlan.asInstanceOf[HoodieDummyExpressionHolder].exprs.head
 
     val bucketSet = bucketIndexSupport.filterQueriesWithBucketHashField(splitConjunctivePredicates(optimizerExpr))
     if (fallback) {
@@ -350,8 +403,9 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
   def exprFilePathAnswerCheck(bucketIndexSupport: BucketIndexSupport, exprRaw: String, expectResult: Set[String],
                               allFileStatus: Set[String], fallback: Boolean): Unit = {
     val resolveExpr = HoodieCatalystExpressionUtils.resolveExpr(spark, exprRaw, structSchema)
-    val optimizerPlan = spark.sessionState.optimizer.execute(DummyExpressionHolder(Seq(resolveExpr)))
-    val optimizerExpr = optimizerPlan.asInstanceOf[DummyExpressionHolder].exprs.head
+    val dummyExpressionHolder = HoodieDummyExpressionHolder(Seq(resolveExpr), resolveExpr.references.toSeq)
+    val optimizerPlan = spark.sessionState.optimizer.execute(dummyExpressionHolder)
+    val optimizerExpr = optimizerPlan.asInstanceOf[HoodieDummyExpressionHolder].exprs.head
 
     val bucketSet = bucketIndexSupport.filterQueriesWithBucketHashField(splitConjunctivePredicates(optimizerExpr))
     if (fallback) {
@@ -397,4 +451,10 @@ class TestBucketIndexSupport extends HoodieSparkClientTestBase with PredicateHel
     metadataConfig.setValue(HoodieIndexConfig.BUCKET_QUERY_INDEX, "true")
     assert(bucketIndexSupport.isIndexAvailable)
   }
+}
+
+// SPARK-44219 added extra rule to validate expressions against its children's references to check if there are dangling references
+// This is forked from Spark's [[DummyExpressionHolder]], which always set the output to Nil and would fail this test
+case class HoodieDummyExpressionHolder(exprs: Seq[Expression], output: Seq[Attribute]) extends LeafNode {
+  override lazy val resolved = true
 }

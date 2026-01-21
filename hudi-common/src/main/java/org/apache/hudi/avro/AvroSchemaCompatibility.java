@@ -21,12 +21,14 @@ package org.apache.hudi.avro;
 import org.apache.hudi.common.util.Either;
 import org.apache.hudi.common.util.Option;
 
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.AvroRuntimeException;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.Schema.Type;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -61,14 +63,9 @@ import static org.apache.hudi.common.util.ValidationUtils.checkState;
  *   a union</li>
  * </ol>
  */
+@NoArgsConstructor(access = AccessLevel.PRIVATE)
+@Slf4j
 public class AvroSchemaCompatibility {
-  private static final Logger LOG = LoggerFactory.getLogger(AvroSchemaCompatibility.class);
-
-  /**
-   * Utility class cannot be instantiated.
-   */
-  private AvroSchemaCompatibility() {
-  }
 
   /**
    * Message to annotate reader/writer schema pairs that are compatible.
@@ -266,7 +263,7 @@ public class AvroSchemaCompatibility {
     private SchemaCompatibilityResult getCompatibility(final Schema reader,
                                                        final Schema writer,
                                                        final Deque<LocationInfo> locations) {
-      LOG.debug("Checking compatibility of reader {} with writer {}", reader, writer);
+      log.debug("Checking compatibility of reader {} with writer {}", reader, writer);
       final ReaderWriter pair = new ReaderWriter(reader, writer);
       SchemaCompatibilityResult result = mMemoizeMap.get(pair);
       if (result != null) {
@@ -522,15 +519,46 @@ public class AvroSchemaCompatibility {
 
     private SchemaCompatibilityResult checkFixedSize(final Schema reader, final Schema writer,
                                                      final Deque<LocationInfo> locations) {
-      SchemaCompatibilityResult result = SchemaCompatibilityResult.compatible();
       int actual = reader.getFixedSize();
       int expected = writer.getFixedSize();
       if (actual != expected) {
         String message = String.format("Fixed size field '%s' expected: %d, found: %d", getLocationName(locations, reader.getType()), expected, actual);
-        result = SchemaCompatibilityResult.incompatible(SchemaIncompatibilityType.FIXED_SIZE_MISMATCH, reader, writer,
+        return SchemaCompatibilityResult.incompatible(SchemaIncompatibilityType.FIXED_SIZE_MISMATCH, reader, writer,
             message, asList(locations));
       }
-      return result;
+      return checkDecimalWidening(reader, writer, locations);
+    }
+
+    private SchemaCompatibilityResult checkDecimalWidening(final Schema reader, final Schema writer,
+                                                           final Deque<LocationInfo> locations) {
+      boolean isReaderDecimal = reader.getLogicalType() instanceof LogicalTypes.Decimal;
+      boolean isWriterDecimal = writer.getLogicalType() instanceof LogicalTypes.Decimal;
+      if (!isReaderDecimal && !isWriterDecimal) {
+        return SchemaCompatibilityResult.compatible();
+      }
+
+      if (!isReaderDecimal || !isWriterDecimal) {
+        String message = String.format("Decimal field '%s' expected: %s, found: %s", getLocationName(locations, reader.getType()), writer, reader);
+        return SchemaCompatibilityResult.incompatible(SchemaIncompatibilityType.DECIMAL_MISMATCH, reader, writer,
+            message, asList(locations));
+      }
+
+      int readerScale = ((LogicalTypes.Decimal) reader.getLogicalType()).getScale();
+      int writerScale = ((LogicalTypes.Decimal) writer.getLogicalType()).getScale();
+      int readerPrecision = ((LogicalTypes.Decimal) reader.getLogicalType()).getPrecision();
+      int writerPrecision = ((LogicalTypes.Decimal) writer.getLogicalType()).getPrecision();
+      if (readerScale == writerScale && readerPrecision == writerPrecision) {
+        return SchemaCompatibilityResult.compatible();
+      }
+
+      if (((readerPrecision - readerScale) < (writerPrecision - writerScale)) || (readerScale < writerScale)) {
+        String message = String.format("Decimal field '%s' evolution is lossy. Existing precision: %d, scale: %d, Incoming precision: %d, scale: %d",
+            getLocationName(locations, reader.getType()), writerPrecision, writerScale, readerPrecision, readerScale);
+        return SchemaCompatibilityResult.incompatible(SchemaIncompatibilityType.DECIMAL_MISMATCH, reader, writer,
+            message, asList(locations));
+      }
+
+      return SchemaCompatibilityResult.compatible();
     }
 
     private SchemaCompatibilityResult checkSchemaNames(final Schema reader, final Schema writer,
@@ -593,7 +621,7 @@ public class AvroSchemaCompatibility {
 
   public enum SchemaIncompatibilityType {
     NAME_MISMATCH, FIXED_SIZE_MISMATCH, MISSING_ENUM_SYMBOLS, READER_FIELD_MISSING_DEFAULT_VALUE, TYPE_MISMATCH,
-    MISSING_UNION_BRANCH
+    DECIMAL_MISMATCH, MISSING_UNION_BRANCH
   }
 
   /**
@@ -740,6 +768,7 @@ public class AvroSchemaCompatibility {
           mIncompatibilities);
     }
   }
+
   // -----------------------------------------------------------------------------------------------
 
   public static final class Incompatibility {
@@ -891,6 +920,7 @@ public class AvroSchemaCompatibility {
           getLocation(), mMessage, mReaderFragment, mWriterFragment);
     }
   }
+
   // -----------------------------------------------------------------------------------------------
 
   /**

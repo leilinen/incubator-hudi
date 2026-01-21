@@ -25,6 +25,7 @@ import org.apache.hudi.client.BaseHoodieWriteClient;
 import org.apache.hudi.client.SparkRDDReadClient;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.SparkTaskContextSupplier;
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.HoodieCleanStat;
@@ -71,6 +72,7 @@ import org.apache.hudi.timeline.service.TimelineService;
 import org.apache.hudi.util.JFunction;
 import org.apache.hudi.utils.HoodieWriterClientTestHarness;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
@@ -84,8 +86,6 @@ import org.apache.spark.sql.SparkSessionExtensions;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestInfo;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -118,9 +118,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * The test harness for resource initialization and cleanup.
  */
+@Slf4j
 public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTestHarness {
-
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieSparkClientTestHarness.class);
 
   @AfterAll
   public static void tearDownAll() throws IOException {
@@ -213,12 +212,13 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
         .config(jsc.getConf())
         .getOrCreate();
 
-    sqlContext = new SQLContext(sparkSession);
+    sqlContext = SQLContext.getOrCreate(sparkContext);
     context = new HoodieSparkEngineContext(jsc, sqlContext);
 
     // NOTE: It's important to set Spark's `Tests.IS_TESTING` so that our tests are recognized
     //       as such by Spark
     System.setProperty("spark.testing", "true");
+    sparkSession.sparkContext().persistentRdds().foreach(rdd -> rdd._2.persist());
   }
 
   /**
@@ -237,21 +237,24 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
    * Cleanups Spark contexts ({@link JavaSparkContext} and {@link SQLContext}).
    */
   protected void cleanupSparkContexts() {
-    if (sqlContext != null) {
-      LOG.info("Clearing sql context cache of spark-session used in previous test-case");
-      sqlContext.clearCache();
-      sqlContext = null;
+    if (sparkSession != null) {
+      sparkSession.stop();
       sparkSession = null;
     }
 
+    // SparkSession.stop() should clean the necessary resources.
+    if (sqlContext != null) {
+      sqlContext = null;
+    }
+
     if (jsc != null) {
-      LOG.info("Closing spark context used in previous test-case");
+      log.info("Closing spark context used in previous test-case");
       jsc.stop();
       jsc = null;
     }
 
     if (context != null) {
-      LOG.info("Closing spark engine context used in previous test-case");
+      log.info("Closing spark engine context used in previous test-case");
       context = null;
     }
   }
@@ -281,7 +284,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
    */
   protected void cleanupFileSystem() throws IOException {
     if (storage != null) {
-      LOG.warn("Closing file-system instance used in previous test-run");
+      log.warn("Closing file-system instance used in previous test-run");
       storage.close();
       storage = null;
     }
@@ -404,7 +407,11 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
 
   @Override
   public SparkRDDWriteClient getHoodieWriteClient(HoodieWriteConfig cfg) {
-    if (null != writeClient) {
+    return getHoodieWriteClient(cfg, true);
+  }
+
+  public SparkRDDWriteClient getHoodieWriteClient(HoodieWriteConfig cfg, boolean shouldCloseOlderClient) {
+    if (null != writeClient && shouldCloseOlderClient) {
       writeClient.close();
       writeClient = null;
     }
@@ -443,7 +450,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     return HoodieJavaRDD.getJavaRDD(index.tagLocation(HoodieJavaRDD.of(records), context, table));
   }
 
-  public static Pair<HashMap<String, WorkloadStat>, WorkloadStat> buildProfile(JavaRDD<HoodieRecord> inputRecordsRDD) {
+  public static Pair<Map<String, WorkloadStat>, WorkloadStat> buildProfile(JavaRDD<HoodieRecord> inputRecordsRDD) {
     HashMap<String, WorkloadStat> partitionPathStatMap = new HashMap<>();
     WorkloadStat globalStat = new WorkloadStat();
 
@@ -479,18 +486,14 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
 
   @Override
   protected List<WriteStatus> writeAndVerifyBatch(BaseHoodieWriteClient client, List<HoodieRecord> inserts, String commitTime, boolean populateMetaFields, boolean autoCommitOff) {
-    client.startCommitWithTime(commitTime);
+    WriteClientTestUtils.startCommitWithTime(client, commitTime);
     JavaRDD<HoodieRecord> insertRecordsRDD1 = jsc.parallelize(inserts, 2);
-    JavaRDD<WriteStatus> statusRDD = ((SparkRDDWriteClient) client).upsert(insertRecordsRDD1, commitTime);
-    if (autoCommitOff) {
-      client.commit(commitTime, statusRDD);
-    }
-    List<WriteStatus> statuses = statusRDD.collect();
-    assertNoWriteErrors(statuses);
-    verifyRecordsWritten(commitTime, populateMetaFields, inserts, statuses, client.getConfig(),
+    List<WriteStatus> statusList = ((SparkRDDWriteClient) client).upsert(insertRecordsRDD1, commitTime).collect();
+    client.commit(commitTime, jsc.parallelize(statusList, 1));
+    assertNoWriteErrors(statusList);
+    verifyRecordsWritten(commitTime, populateMetaFields, inserts, statusList, client.getConfig(),
         HoodieSparkKeyGeneratorFactory.createKeyGenerator(client.getConfig().getProps()));
-
-    return statuses;
+    return statusList;
   }
 
   /**
@@ -551,7 +554,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
       runFullValidation(table.getConfig().getMetadataConfig(), writeConfig, metadataTableBasePath, engineContext);
     }
 
-    LOG.info("Validation time={}", timer.endTimer());
+    log.info("Validation time={}", timer.endTimer());
   }
 
   public void syncTableMetadata(HoodieWriteConfig writeConfig) {
@@ -560,7 +563,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     }
     // Open up the metadata table again, for syncing
     try (HoodieTableMetadataWriter writer = SparkHoodieBackedTableMetadataWriter.create(storageConf, writeConfig, context)) {
-      LOG.info("Successfully synced to metadata table");
+      log.info("Successfully synced to metadata table");
     } catch (Exception e) {
       throw new HoodieMetadataException("Error syncing to metadata table.", e);
     }
@@ -573,7 +576,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
 
   public HoodieTableMetadata metadata(HoodieWriteConfig clientConfig,
                                       HoodieEngineContext hoodieEngineContext) {
-    return HoodieTableMetadata.create(
+    return metaClient.getTableFormat().getMetadataFactory().create(
         hoodieEngineContext, storage, clientConfig.getMetadataConfig(), clientConfig.getBasePath());
   }
 
@@ -618,12 +621,6 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
         tableView.getAllFileGroups(partition).collect(Collectors.toList());
     fileGroups.addAll(tableView.getAllReplacedFileGroups(partition).collect(Collectors.toList()));
 
-    fileGroups.forEach(g -> LoggerFactory.getLogger(getClass()).info(g.toString()));
-    fileGroups.forEach(g -> g.getAllBaseFiles()
-        .forEach(b -> LoggerFactory.getLogger(getClass()).info(b.toString())));
-    fileGroups.forEach(g -> g.getAllFileSlices()
-        .forEach(s -> LoggerFactory.getLogger(getClass()).info(s.toString())));
-
     long numFiles = fileGroups.stream()
         .mapToLong(g -> g.getAllBaseFiles().count()
             + g.getAllFileSlices().mapToLong(s -> s.getLogFiles().count()).sum())
@@ -650,8 +647,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     // Metadata table has a fixed number of partitions
     // Cannot use FSUtils.getAllFoldersWithPartitionMetaFile for this as that function filters all directory
     // in the .hoodie folder.
-    List<String> metadataTablePartitions = FSUtils.getAllPartitionPaths(
-        engineContext, storage, HoodieTableMetadata.getMetadataTableBasePath(basePath), false);
+    List<String> metadataTablePartitions = FSUtils.getAllPartitionPaths(engineContext, metadataMetaClient, false);
 
     // Metadata table should automatically compact and clean
     // versions are +1 as autoClean / compaction happens end of commits

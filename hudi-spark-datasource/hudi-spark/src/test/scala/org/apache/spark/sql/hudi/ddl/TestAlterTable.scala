@@ -53,7 +53,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts'
+             |  orderingFields = 'ts'
              | )
        """.stripMargin)
 
@@ -164,7 +164,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts'
+             |  orderingFields = 'ts'
              | )
              | partitioned by (dt)
        """.stripMargin)
@@ -193,7 +193,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts',
+             |  orderingFields = 'ts',
              |  `hoodie.index.type`='BUCKET',
              |  `hoodie.index.bucket.engine`='SIMPLE',
              |  `hoodie.bucket.index.num.buckets`='2',
@@ -234,7 +234,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts',
+             |  orderingFields = 'ts',
              |  hoodie.metadata.enable = 'false',
              |  hoodie.clean.commits.retained = '100',
              |  hoodie.clustering.inline = 'true',
@@ -248,8 +248,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
         // Create an inflight commit
         val client = HoodieCLIUtils.createHoodieWriteClient(spark, tablePath, Map.empty, Option(tableName))
         val metaClient = createMetaClient(spark, tablePath)
-        val firstInstant = client.createNewInstantTime()
-        client.startCommitWithTime(firstInstant, HoodieTimeline.COMMIT_ACTION)
+        val firstInstant = client.startCommit(HoodieTimeline.COMMIT_ACTION)
         val hoodieTable = HoodieSparkTable.create(client.getConfig, client.getEngineContext)
         val timeLine = hoodieTable.getActiveTimeline
         val requested = hoodieTable.getInstantGenerator.createNewInstant(State.REQUESTED, HoodieTimeline.COMMIT_ACTION, firstInstant)
@@ -302,7 +301,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
 
   def validateTableSchema(tablePath: String): Unit = {
     val metaClient = createMetaClient(spark, tablePath)
-    val schema = new TableSchemaResolver(metaClient).getTableAvroSchema(false)
+    val schema = new TableSchemaResolver(metaClient).getTableSchema(false)
     assertFalse(schema.getFields.asScala.exists(f => HoodieRecord.HOODIE_META_COLUMNS.contains(f.name())),
       "Metadata fields should be excluded from the table schema")
   }
@@ -322,7 +321,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
            | tblproperties (
            |  type = '$tableType',
            |  primaryKey = 'id',
-           |  preCombineField = 'ts'
+           |  orderingFields = 'ts'
            | )
      """.stripMargin)
 
@@ -361,7 +360,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts'
+             |  orderingFields = 'ts'
              | )
        """.stripMargin)
 
@@ -402,7 +401,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = '$tableType',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts',
+             |  orderingFields = 'ts',
              |  hoodie.write.concurrency.mode='optimistic_concurrency_control',
              |  hoodie.clean.failed.writes.policy='LAZY',
              |  hoodie.write.lock.provider='org.apache.hudi.client.transaction.lock.FileSystemBasedLockProvider'
@@ -485,7 +484,7 @@ class TestAlterTable extends HoodieSparkSqlTestBase {
              | tblproperties (
              |  type = 'cow',
              |  primaryKey = 'id',
-             |  preCombineField = 'ts',
+             |  orderingFields = 'ts',
              |  hoodie.clean.trigger.strategy = 'NUM_COMMITS',
              |  hoodie.clean.commits.retained = '3'
              | )

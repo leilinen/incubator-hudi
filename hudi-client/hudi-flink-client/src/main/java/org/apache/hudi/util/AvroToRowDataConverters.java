@@ -18,9 +18,12 @@
 
 package org.apache.hudi.util;
 
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
 import org.apache.avro.generic.GenericFixed;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
+import org.apache.avro.util.Utf8;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.data.DecimalData;
@@ -138,7 +141,7 @@ public class AvroToRowDataConverters {
         return createTimestampConverter(((TimestampType) type).getPrecision(), utcTimezone);
       case CHAR:
       case VARCHAR:
-        return avroObject -> StringData.fromString(avroObject.toString());
+        return avroObject -> avroObject instanceof Utf8 ? StringData.fromBytes(((Utf8) avroObject).getBytes()) : StringData.fromString(avroObject.toString());
       case BINARY:
       case VARBINARY:
         return AvroToRowDataConverters::convertToBytes;
@@ -195,7 +198,7 @@ public class AvroToRowDataConverters {
     final AvroToRowDataConverter keyConverter =
         createConverter(DataTypes.STRING().getLogicalType(), utcTimezone);
     final AvroToRowDataConverter valueConverter =
-        createNullableConverter(AvroSchemaConverter.extractValueTypeToAvroMap(type), utcTimezone);
+        createNullableConverter(HoodieSchemaConverter.extractValueTypeToMap(type), utcTimezone);
 
     return avroObject -> {
       final Map<?, ?> map = (Map<?, ?>) avroObject;
@@ -296,6 +299,7 @@ public class AvroToRowDataConverters {
    * Encapsulates joda optional dependency. Instantiates this class only if joda is available on the
    * classpath.
    */
+  @NoArgsConstructor(access = AccessLevel.PRIVATE)
   static class JodaConverter {
 
     private static JodaConverter instance;
@@ -330,9 +334,6 @@ public class AvroToRowDataConverters {
     public long convertTimestamp(Object object) {
       final DateTime value = (DateTime) object;
       return value.toDate().getTime();
-    }
-
-    private JodaConverter() {
     }
   }
 }

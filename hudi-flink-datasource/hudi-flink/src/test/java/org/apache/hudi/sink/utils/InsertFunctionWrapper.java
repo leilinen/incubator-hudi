@@ -22,12 +22,14 @@ import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.sink.StreamWriteOperatorCoordinator;
 import org.apache.hudi.sink.append.AppendWriteFunction;
+import org.apache.hudi.sink.append.AppendWriteFunctions;
 import org.apache.hudi.sink.bulk.BulkInsertWriterHelper;
 import org.apache.hudi.sink.common.AbstractWriteFunction;
 import org.apache.hudi.sink.event.WriteMetadataEvent;
-import org.apache.hudi.util.AvroSchemaConverter;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
 
+import lombok.Getter;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
@@ -61,6 +63,7 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   private final MockOperatorEventGateway gateway;
   private final MockSubtaskGateway subtaskGateway;
   private final MockOperatorCoordinatorContext coordinatorContext;
+  @Getter
   private StreamWriteOperatorCoordinator coordinator;
   private final MockStateInitializationContext stateInitializationContext;
 
@@ -83,7 +86,7 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     this.gateway = new MockOperatorEventGateway();
     this.subtaskGateway = new MockSubtaskGateway();
     this.conf = conf;
-    this.rowType = (RowType) AvroSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf)).getLogicalType();
+    this.rowType = (RowType) HoodieSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf)).getLogicalType();
     // one function
     this.coordinatorContext = new MockOperatorCoordinatorContext(new OperatorID(), 1);
     this.coordinator = new StreamWriteOperatorCoordinator(conf, this.coordinatorContext);
@@ -104,8 +107,6 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     this.coordinator.setExecutor(new MockCoordinatorExecutor(coordinatorContext));
 
     setupWriteFunction();
-    // handle the bootstrap event
-    coordinator.handleEventFromOperator(0, getNextEvent());
 
     if (asyncClustering) {
       clusteringFunctionWrapper.openFunction();
@@ -118,6 +119,11 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
 
   public WriteMetadataEvent[] getEventBuffer() {
     return this.coordinator.getEventBuffer();
+  }
+
+  @Override
+  public WriteMetadataEvent[] getEventBuffer(long checkpointId) {
+    return this.coordinator.getEventBuffer(checkpointId);
   }
 
   public OperatorEvent getNextEvent() {
@@ -178,10 +184,6 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     setupWriteFunction();
   }
 
-  public StreamWriteOperatorCoordinator getCoordinator() {
-    return coordinator;
-  }
-
   @Override
   public AbstractWriteFunction getWriteFunction() {
     return this.writeFunction;
@@ -204,11 +206,12 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   // -------------------------------------------------------------------------
 
   private void setupWriteFunction() throws Exception {
-    writeFunction = new AppendWriteFunction<>(conf, rowType);
+    writeFunction = AppendWriteFunctions.create(conf, rowType);
     writeFunction.setRuntimeContext(runtimeContext);
     writeFunction.setOperatorEventGateway(gateway);
     writeFunction.initializeState(this.stateInitializationContext);
     writeFunction.open(conf);
+    writeFunction.setCorrespondent(new MockCorrespondent(this.coordinator));
     // set up subtask gateway
     coordinator.subtaskReady(0, subtaskGateway);
   }

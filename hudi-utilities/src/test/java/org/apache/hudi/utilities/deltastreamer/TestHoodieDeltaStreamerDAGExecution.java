@@ -22,7 +22,7 @@ package org.apache.hudi.utilities.deltastreamer;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.utilities.sources.ParquetDFSSource;
 
@@ -69,7 +69,7 @@ public class TestHoodieDeltaStreamerDAGExecution extends HoodieDeltaStreamerTest
   @Test
   public void testCompactionDoesNotTriggerRepeatedDAG() throws Exception {
     // Configure 3 transformers of same type. 2nd transformer has no suffix
-    StageListener stageListener = new StageListener("org.apache.hudi.table.action.compact.RunCompactionActionExecutor.execute");
+    StageListener stageListener = new StageListener("collect at SparkRDDTableServiceClient");
     sparkSession.sparkContext().addSparkListener(stageListener);
     List<String> configs = Arrays.asList("hoodie.compact.inline.max.delta.commits=1", "hoodie.compact.inline=true");
     runDeltaStreamer(WriteOperationType.UPSERT, true, Option.of(configs));
@@ -95,11 +95,13 @@ public class TestHoodieDeltaStreamerDAGExecution extends HoodieDeltaStreamerTest
     deltaStreamer.sync();
     assertRecordCount(parquetRecordsCount, tableBasePath, sqlContext);
     testNum++;
+    deltaStreamer.shutdownGracefully();
 
     if (shouldGenerateUpdates) {
       prepareParquetDFSUpdates(parquetRecordsCount, PARQUET_SOURCE_ROOT, FIRST_PARQUET_FILE_NAME, false, null, null, dataGenerator, "001");
       HoodieDeltaStreamer updateDs = new HoodieDeltaStreamer(config, jsc);
       updateDs.sync();
+      updateDs.shutdownGracefully();
     }
   }
 
@@ -114,7 +116,7 @@ public class TestHoodieDeltaStreamerDAGExecution extends HoodieDeltaStreamerTest
 
     @Override
     public void onStageCompleted(SparkListenerStageCompleted stageCompleted) {
-      if (stageCompleted.stageInfo().details().contains(eventToTrack)) {
+      if (stageCompleted.stageInfo().name().contains(eventToTrack)) {
         triggerCount += 1;
       }
     }

@@ -44,6 +44,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.text.ParseException;
@@ -133,6 +134,12 @@ public class TimelineUtils {
                 partitionToLatestDeleteTimestamp.put(partition, instant.requestedTime());
               }
             });
+          } catch (HoodieIOException e) {
+            if (e.getCause() instanceof FileNotFoundException) {
+              LOG.warn("Instant {} not found in storage and has been archived", instant, e);
+            } else {
+              throw e;
+            }
           } catch (IOException e) {
             throw new HoodieIOException("Failed to get partitions cleaned at " + instant, e);
           }
@@ -462,9 +469,8 @@ public class TimelineUtils {
             "Found hollow commit: '%s'. Adjust config `%s` accordingly if to avoid throwing this exception.",
             hollowCommitTimestamp, INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT.key()));
       case BLOCK:
-        LOG.warn(String.format(
-            "Found hollow commit '%s'. Config `%s` was set to `%s`: no data will be returned beyond '%s' until it's completed.",
-            hollowCommitTimestamp, INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT.key(), handlingMode, hollowCommitTimestamp));
+        LOG.warn("Found hollow commit '{}'. Config `{}` was set to `{}`: no data will be returned beyond '{}' until it's completed.",
+            hollowCommitTimestamp, INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT.key(), handlingMode, hollowCommitTimestamp);
         return completedCommitTimeline.findInstantsBefore(hollowCommitTimestamp);
       default:
         throw new HoodieException("Unexpected handling mode: " + handlingMode);
@@ -575,7 +581,7 @@ public class TimelineUtils {
       } else if (instant.getAction().equals(DELTA_COMMIT_ACTION)) {
         // Deltacommit is used by both ingestion and logcompaction.
         // So, distinguish both of them check for the inflight file being present.
-        HoodieActiveTimeline rawActiveTimeline = metaClient.getTimelineLayout().getTimelineFactory().createActiveTimeline(metaClient, false);
+        HoodieActiveTimeline rawActiveTimeline = metaClient.getTableFormat().getTimelineFactory().createActiveTimeline(metaClient, false);
         Option<HoodieInstant> logCompactionInstant = Option.fromJavaOptional(rawActiveTimeline.getInstantsAsStream()
             .filter(hoodieInstant -> hoodieInstant.requestedTime().equals(instant.requestedTime())
                 && LOG_COMPACTION_ACTION.equals(hoodieInstant.getAction())).findFirst());
@@ -596,7 +602,7 @@ public class TimelineUtils {
    */
   public static HoodieTimeline concatTimeline(HoodieTimeline timeline1, HoodieTimeline timeline2,
                                               HoodieTableMetaClient metaClient) {
-    return metaClient.getTimelineLayout().getTimelineFactory().createDefaultTimeline(
+    return metaClient.getTableFormat().getTimelineFactory().createDefaultTimeline(
         Stream.concat(timeline1.getInstantsAsStream(), timeline2.getInstantsAsStream()).sorted(),
         metaClient.getActiveTimeline());
   }

@@ -23,6 +23,7 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.sink.StreamWriteOperatorCoordinator;
 import org.apache.hudi.sink.common.AbstractWriteFunction;
 import org.apache.hudi.sink.event.WriteMetadataEvent;
+import org.apache.hudi.sink.partitioner.BucketAssignFunction;
 
 import org.apache.flink.runtime.operators.coordination.MockOperatorCoordinatorContext;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
@@ -45,9 +46,14 @@ public interface TestFunctionWrapper<I> {
   void invoke(I record) throws Exception;
 
   /**
-   * Returns the event buffer sent by the write tasks.
+   * Returns the latest event buffer sent by the write tasks.
    */
   WriteMetadataEvent[] getEventBuffer();
+
+  /**
+   * Returns the event buffer sent by the write tasks with given checkpoint ID.
+   */
+  WriteMetadataEvent[] getEventBuffer(long checkpointId);
 
   /**
    * Returns the next event sent to Coordinator.
@@ -117,6 +123,13 @@ public interface TestFunctionWrapper<I> {
   AbstractWriteFunction getWriteFunction();
 
   /**
+   * Returns the bucket assigner function
+   */
+  default BucketAssignFunction getBucketAssignFunction() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
    * Returns the data buffer of the write task.
    */
   default Map<String, List<HoodieRecord>> getDataBuffer() {
@@ -155,13 +168,6 @@ public interface TestFunctionWrapper<I> {
    * Returns whether the bootstrap function already bootstrapped.
    */
   default boolean isAlreadyBootstrap() throws Exception {
-    throw new UnsupportedOperationException();
-  }
-
-  /**
-   * Returns whether the write task is confirming.
-   */
-  default boolean isConforming() {
     throw new UnsupportedOperationException();
   }
 

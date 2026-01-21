@@ -18,37 +18,41 @@
 
 package org.apache.hudi.cli.commands;
 
+import org.apache.hudi.avro.HoodieAvroReaderContext;
 import org.apache.hudi.cli.HoodieCLI;
 import org.apache.hudi.cli.HoodiePrintHelper;
 import org.apache.hudi.cli.HoodieTableHeaderFields;
 import org.apache.hudi.cli.TableHeader;
-import org.apache.hudi.common.config.HoodieCommonConfig;
-import org.apache.hudi.common.config.HoodieMemoryConfig;
-import org.apache.hudi.common.config.HoodieReaderConfig;
+import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.fs.FSUtils;
-import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
+import org.apache.hudi.common.model.FileSlice;
+import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.table.log.HoodieLogFormat.Reader;
-import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.table.log.block.HoodieCorruptBlock;
 import org.apache.hudi.common.table.log.block.HoodieDataBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock.FooterMetadataType;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock.HeaderMetadataType;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock.HoodieLogBlockType;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.common.table.read.HoodieFileGroupReader;
+import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
+import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.avro.Schema;
 import org.apache.avro.generic.IndexedRecord;
 import org.springframework.shell.standard.ShellComponent;
 import org.springframework.shell.standard.ShellMethod;
@@ -61,13 +65,16 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import scala.Tuple2;
 import scala.Tuple3;
 
+import static org.apache.hudi.common.config.HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED;
+import static org.apache.hudi.common.config.HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE;
+import static org.apache.hudi.common.config.HoodieMemoryConfig.MAX_MEMORY_FOR_MERGE;
+import static org.apache.hudi.common.config.HoodieMemoryConfig.SPILLABLE_MAP_BASE_PATH;
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 
 /**
@@ -108,7 +115,7 @@ public class HoodieLogFileCommand {
       } else {
         fileName = path.getName();
       }
-      Schema writerSchema = TableSchemaResolver.readSchemaFromLogFile(storage, path);
+      HoodieSchema writerSchema = TableSchemaResolver.readSchemaFromLogFile(storage, path);
       try (Reader reader = HoodieLogFormat.newReader(storage, new HoodieLogFile(path), writerSchema)) {
 
         // read the avro blocks
@@ -189,7 +196,7 @@ public class HoodieLogFileCommand {
 
   @ShellMethod(key = "show logfile records", value = "Read records from log files")
   public String showLogFileRecords(
-      @ShellOption(value = {"--limit"}, help = "Limit commits",
+      @ShellOption(value = {"--limit"}, help = "Limit number of records",
           defaultValue = "10") final Integer limit,
       @ShellOption(value = "--logFilePathPattern",
           help = "Fully qualified paths for the log files") final String logFilePathPattern,
@@ -210,10 +217,10 @@ public class HoodieLogFileCommand {
     checkArgument(logFilePaths.size() > 0, "There is no log file");
 
     // TODO : readerSchema can change across blocks/log files, fix this inside Scanner
-    Schema readerSchema = null;
+    HoodieSchema readerSchema = null;
     // get schema from last log file
     for (int i = logFilePaths.size() - 1; i >= 0; i--) {
-      Schema schema = TableSchemaResolver.readSchemaFromLogFile(
+      HoodieSchema schema = TableSchemaResolver.readSchemaFromLogFile(
           storage, new StoragePath(logFilePaths.get(i)));
       if (schema != null) {
         readerSchema = schema;
@@ -222,38 +229,39 @@ public class HoodieLogFileCommand {
     }
     Objects.requireNonNull(readerSchema);
     List<IndexedRecord> allRecords = new ArrayList<>();
-
     if (shouldMerge) {
       System.out.println("===========================> MERGING RECORDS <===================");
-      HoodieMergedLogRecordScanner scanner =
-          HoodieMergedLogRecordScanner.newBuilder()
-              .withStorage(storage)
-              .withBasePath(client.getBasePath())
-              .withLogFilePaths(logFilePaths)
-              .withReaderSchema(readerSchema)
-              .withLatestInstantTime(
-                  client.getActiveTimeline()
-                      .getCommitAndReplaceTimeline().lastInstant().get().requestedTime())
-              .withReverseReader(
-                  Boolean.parseBoolean(
-                      HoodieReaderConfig.COMPACTION_REVERSE_LOG_READ_ENABLE.defaultValue()))
-              .withBufferSize(HoodieMemoryConfig.MAX_DFS_STREAM_BUFFER_SIZE.defaultValue())
-              .withMaxMemorySizeInBytes(
-                  HoodieMemoryConfig.DEFAULT_MAX_MEMORY_FOR_SPILLABLE_MAP_IN_BYTES)
-              .withSpillableMapBasePath(FileIOUtils.getDefaultSpillableMapBasePath())
-              .withDiskMapType(HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE.defaultValue())
-              .withBitCaskDiskMapCompressionEnabled(HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue())
-              .withOptimizedLogBlocksScan(Boolean.parseBoolean(HoodieReaderConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN.defaultValue()))
-              .build();
-      for (HoodieRecord hoodieRecord : scanner) {
-        Option<HoodieAvroIndexedRecord> record = hoodieRecord.toIndexedRecord(readerSchema, new Properties());
-        if (allRecords.size() < limit) {
-          allRecords.add(record.get().getData());
-        }
+      StoragePath firstLogFile = new StoragePath(logFilePaths.get(0));
+      HoodieFileGroupId fileGroupId = new HoodieFileGroupId(FSUtils.getRelativePartitionPath(HoodieCLI.getTableMetaClient().getBasePath(), firstLogFile), FSUtils.getFileIdFromLogPath(firstLogFile));
+      FileSlice fileSlice = new FileSlice(fileGroupId, HoodieTimeline.INIT_INSTANT_TS, null, logFilePaths.stream()
+          .map(l -> new HoodieLogFile(new StoragePath(l))).collect(Collectors.toList()));
+      TypedProperties fileGroupReaderProperties = buildFileGroupReaderProperties();
+      HoodieReaderContext<IndexedRecord> readerContext = new HoodieAvroReaderContext(
+          HoodieCLI.getTableMetaClient().getStorage().getConf(),
+          HoodieCLI.getTableMetaClient().getTableConfig(),
+          Option.empty(),
+          Option.empty(),
+          fileGroupReaderProperties);
+      try (HoodieFileGroupReader<IndexedRecord> fileGroupReader = HoodieFileGroupReader.<IndexedRecord>newBuilder()
+          .withReaderContext(readerContext)
+          .withHoodieTableMetaClient(HoodieCLI.getTableMetaClient())
+          .withFileSlice(fileSlice)
+          .withDataSchema(readerSchema)
+          .withRequestedSchema(readerSchema)
+          .withLatestCommitTime(client.getActiveTimeline().getCommitAndReplaceTimeline().lastInstant().map(HoodieInstant::requestedTime).orElse(HoodieInstantTimeGenerator.getCurrentInstantTimeStr()))
+          .withProps(fileGroupReaderProperties)
+          .withShouldUseRecordPosition(false)
+          .build();
+           ClosableIterator<IndexedRecord> recordIterator = fileGroupReader.getClosableIterator()) {
+        recordIterator.forEachRemaining(record -> {
+          if (allRecords.size() < limit) {
+            allRecords.add(record);
+          }
+        });
       }
     } else {
       for (String logFile : logFilePaths) {
-        Schema writerSchema = TableSchemaResolver.readSchemaFromLogFile(
+        HoodieSchema writerSchema = TableSchemaResolver.readSchemaFromLogFile(
             client.getStorage(), new StoragePath(logFile));
         try (HoodieLogFormat.Reader reader =
                  HoodieLogFormat.newReader(storage, new HoodieLogFile(new StoragePath(logFile)), writerSchema)) {
@@ -286,5 +294,26 @@ public class HoodieLogFileCommand {
       i++;
     }
     return HoodiePrintHelper.print(new String[] {HoodieTableHeaderFields.HEADER_RECORDS}, rows);
+  }
+
+  /**
+   * Derive necessary properties for FG reader.
+   */
+  private TypedProperties buildFileGroupReaderProperties() {
+    TypedProperties props = new TypedProperties();
+    props.setProperty(
+        MAX_MEMORY_FOR_MERGE.key(),
+        Long.toString(MAX_MEMORY_FOR_MERGE.defaultValue()));
+    props.setProperty(
+        SPILLABLE_MAP_BASE_PATH.key(),
+        FileIOUtils.getDefaultSpillableMapBasePath());
+    props.setProperty(
+        SPILLABLE_DISK_MAP_TYPE.key(),
+        SPILLABLE_DISK_MAP_TYPE.defaultValue().name());
+    props.setProperty(
+        DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(),
+        Boolean.toString(DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()));
+
+    return props;
   }
 }

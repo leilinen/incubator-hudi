@@ -28,12 +28,14 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.TimeGenerator;
 import org.apache.hudi.common.table.timeline.TimeGenerators;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
+import org.apache.hudi.common.util.VisibleForTesting;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieException;
@@ -47,8 +49,8 @@ import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.table.HoodieTable;
 
 import com.codahale.metrics.Timer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -60,27 +62,28 @@ import java.util.Set;
  * Abstract class taking care of holding common member variables (FileSystem, SparkContext, HoodieConfigs) Also, manages
  * embedded timeline-server if enabled.
  */
+@Slf4j
 public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
-
-  private static final Logger LOG = LoggerFactory.getLogger(BaseHoodieClient.class);
 
   private static final long serialVersionUID = 1L;
   protected final transient HoodieStorage storage;
   protected final transient HoodieEngineContext context;
   protected final transient StorageConfiguration<?> storageConf;
   protected final transient HoodieMetrics metrics;
+  @Getter
   protected final HoodieWriteConfig config;
   protected final String basePath;
+  @Getter
   protected final HoodieHeartbeatClient heartbeatClient;
   protected final TransactionManager txnManager;
-  private final TimeGenerator timeGenerator;
+  protected final TimeGenerator timeGenerator;
 
   /**
    * Timeline Server has the same lifetime as that of Client. Any operations done on the same timeline service will be
    * able to take advantage of the cached file-system view. New completed actions will be synced automatically in an
    * incremental fashion.
    */
-  private transient Option<EmbeddedTimelineService> timelineServer;
+  @Getter private transient Option<EmbeddedTimelineService> timelineServer;
   private final boolean shouldStopTimelineServer;
 
   protected BaseHoodieClient(HoodieEngineContext context, HoodieWriteConfig clientConfig) {
@@ -88,7 +91,21 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
   }
 
   protected BaseHoodieClient(HoodieEngineContext context, HoodieWriteConfig clientConfig,
-      Option<EmbeddedTimelineService> timelineServer) {
+                             Option<EmbeddedTimelineService> timelineServer) {
+    this(context, clientConfig, timelineServer, buildTransactionManager(context, clientConfig), buildTimeGenerator(context, clientConfig));
+  }
+
+  private static TimeGenerator buildTimeGenerator(HoodieEngineContext context, HoodieWriteConfig clientConfig) {
+    return TimeGenerators.getTimeGenerator(clientConfig.getTimeGeneratorConfig(), context.getStorageConf());
+  }
+
+  private static TransactionManager buildTransactionManager(HoodieEngineContext context, HoodieWriteConfig clientConfig) {
+    return new TransactionManager(clientConfig, HoodieStorageUtils.getStorage(clientConfig.getBasePath(), context.getStorageConf()));
+  }
+
+  @VisibleForTesting
+  BaseHoodieClient(HoodieEngineContext context, HoodieWriteConfig clientConfig,
+                   Option<EmbeddedTimelineService> timelineServer, TransactionManager transactionManager, TimeGenerator timeGenerator) {
     this.storageConf = context.getStorageConf();
     this.storage = HoodieStorageUtils.getStorage(clientConfig.getBasePath(), storageConf);
     this.context = context;
@@ -100,9 +117,8 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
         clientConfig.getHoodieClientHeartbeatIntervalInMs(),
         clientConfig.getHoodieClientHeartbeatTolerableMisses());
     this.metrics = new HoodieMetrics(config, storage);
-    this.txnManager = new TransactionManager(config, storage);
-    this.timeGenerator = TimeGenerators.getTimeGenerator(
-        config.getTimeGeneratorConfig(), storageConf);
+    this.txnManager = transactionManager;
+    this.timeGenerator = timeGenerator;
     startEmbeddedServerView();
     initWrapperFSMetrics();
     runClientInitCallbacks();
@@ -122,7 +138,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
   private synchronized void stopEmbeddedServerView(boolean resetViewStorageConfig) {
     if (timelineServer.isPresent() && shouldStopTimelineServer) {
       // Stop only if owner
-      LOG.info("Stopping Timeline service !!");
+      log.info("Stopping Timeline service !!");
       timelineServer.get().stopForBasePath(basePath);
     }
 
@@ -140,14 +156,14 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
         try {
           timelineServer = Option.of(EmbeddedTimelineServerHelper.createEmbeddedTimelineService(context, config));
         } catch (IOException e) {
-          LOG.warn("Unable to start timeline service. Proceeding as if embedded server is disabled", e);
+          log.warn("Unable to start timeline service. Proceeding as if embedded server is disabled", e);
           stopEmbeddedServerView(false);
         }
       } else {
-        LOG.info("Timeline Server already running. Not restarting the service");
+        log.debug("Timeline Server already running. Not restarting the service");
       }
     } else {
-      LOG.info("Embedded Timeline Server is disabled. Not starting timeline service");
+      log.info("Embedded Timeline Server is disabled. Not starting timeline service");
     }
   }
 
@@ -164,10 +180,6 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
       }
       ((HoodieClientInitCallback) callback).call(this);
     });
-  }
-
-  public HoodieWriteConfig getConfig() {
-    return config;
   }
 
   public HoodieEngineContext getEngineContext() {
@@ -188,13 +200,6 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
         .setFileSystemRetryConfig(config.getFileSystemRetryConfig())
         .setMetaserverConfig(config.getProps()).build();
   }
-  
-  /**
-   * Returns next instant time in the correct format. An explicit Lock is enabled in the context.
-   */
-  public String createNewInstantTime() {
-    return TimelineUtils.generateInstantTime(true, timeGenerator);
-  }
 
   /**
    * Returns next instant time in the correct format.
@@ -203,14 +208,6 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
    */
   public String createNewInstantTime(boolean shouldLock) {
     return TimelineUtils.generateInstantTime(shouldLock, timeGenerator);
-  }
-
-  public Option<EmbeddedTimelineService> getTimelineServer() {
-    return timelineServer;
-  }
-
-  public HoodieHeartbeatClient getHeartbeatClient() {
-    return heartbeatClient;
   }
 
   /**
@@ -253,7 +250,7 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
       if (finalizeCtx != null) {
         Option<Long> durationInMs = Option.of(metrics.getDurationInMs(finalizeCtx.stop()));
         durationInMs.ifPresent(duration -> {
-          LOG.info("Finalize write elapsed time (milliseconds): {}", duration);
+          log.info("Finalize write elapsed time (milliseconds): {}", duration);
           metrics.updateFinalizeWriteMetrics(duration, stats.size());
         });
       }
@@ -292,4 +289,22 @@ public abstract class BaseHoodieClient implements Serializable, AutoCloseable {
    * @param columnsToIndex list of columns to index.
    */
   protected abstract void updateColumnsToIndexWithColStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex);
+
+  protected void executeUsingTxnManager(Option<HoodieInstant> ownerInstant, Runnable r) {
+    this.txnManager.beginStateChange(ownerInstant, Option.empty());
+    try {
+      r.run();
+    } finally {
+      this.txnManager.endStateChange(ownerInstant);
+    }
+  }
+
+  public TransactionManager getTransactionManager() {
+    return txnManager;
+  }
+
+  protected boolean isStreamingWriteToMetadataEnabled(HoodieTable table) {
+    return config.isMetadataTableEnabled()
+        && config.isMetadataStreamingWritesEnabled(table.getMetaClient().getTableConfig().getTableVersion());
+  }
 }

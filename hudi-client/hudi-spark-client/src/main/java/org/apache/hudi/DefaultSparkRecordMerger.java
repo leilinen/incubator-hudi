@@ -20,16 +20,13 @@
 package org.apache.hudi;
 
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
+import org.apache.hudi.common.engine.RecordContext;
 import org.apache.hudi.common.model.HoodieRecordMerger;
-import org.apache.hudi.common.model.HoodieSparkRecord;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.ValidationUtils;
-import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.table.read.BufferedRecord;
 import org.apache.hudi.merge.SparkRecordMergingUtils;
 
-import org.apache.avro.Schema;
+import org.apache.spark.sql.catalyst.InternalRow;
 
 import java.io.IOException;
 
@@ -44,78 +41,38 @@ public class DefaultSparkRecordMerger extends HoodieSparkRecordMerger {
   }
 
   @Override
-  public Option<Pair<HoodieRecord, Schema>> merge(HoodieRecord older, Schema oldSchema, HoodieRecord newer, Schema newSchema, TypedProperties props) throws IOException {
-    ValidationUtils.checkArgument(older.getRecordType() == HoodieRecordType.SPARK);
-    ValidationUtils.checkArgument(newer.getRecordType() == HoodieRecordType.SPARK);
-
-    if (newer instanceof HoodieSparkRecord) {
-      HoodieSparkRecord newSparkRecord = (HoodieSparkRecord) newer;
-      if (newSparkRecord.isDelete(newSchema, props)) {
-        // Delete record
-        return Option.empty();
-      }
-    } else {
-      if (newer.getData() == null) {
-        // Delete record
-        return Option.empty();
-      }
+  public <T> BufferedRecord<T> merge(BufferedRecord<T> older, BufferedRecord<T> newer, RecordContext<T> recordContext, TypedProperties props) throws IOException {
+    if (HoodieRecordMerger.isCommitTimeOrderingDelete(older, newer)) {
+      return newer;
     }
-
-    if (older instanceof HoodieSparkRecord) {
-      HoodieSparkRecord oldSparkRecord = (HoodieSparkRecord) older;
-      if (oldSparkRecord.isDelete(oldSchema, props)) {
-        // use natural order for delete record
-        return Option.of(Pair.of(newer, newSchema));
-      }
+    if (older.getOrderingValue().compareTo(newer.getOrderingValue()) > 0) {
+      return older;
     } else {
-      if (older.getData() == null) {
-        // use natural order for delete record
-        return Option.of(Pair.of(newer, newSchema));
-      }
-    }
-    if (older.getOrderingValue(oldSchema, props).compareTo(newer.getOrderingValue(newSchema, props)) > 0) {
-      return Option.of(Pair.of(older, oldSchema));
-    } else {
-      return Option.of(Pair.of(newer, newSchema));
+      return newer;
     }
   }
 
   @Override
-  public Option<Pair<HoodieRecord, Schema>> partialMerge(HoodieRecord older, Schema oldSchema, HoodieRecord newer, Schema newSchema, Schema readerSchema, TypedProperties props) throws IOException {
-    ValidationUtils.checkArgument(older.getRecordType() == HoodieRecordType.SPARK);
-    ValidationUtils.checkArgument(newer.getRecordType() == HoodieRecordType.SPARK);
-
-    if (newer instanceof HoodieSparkRecord) {
-      HoodieSparkRecord newSparkRecord = (HoodieSparkRecord) newer;
-      if (newSparkRecord.isDelete(newSchema, props)) {
-        // Delete record
-        return Option.empty();
-      }
-    } else {
-      if (newer.getData() == null) {
-        // Delete record
-        return Option.empty();
-      }
+  public <T> BufferedRecord<T> partialMerge(BufferedRecord<T> older, BufferedRecord<T> newer, HoodieSchema readerSchema, RecordContext<T> recordContext, TypedProperties props) throws IOException {
+    if (HoodieRecordMerger.isCommitTimeOrderingDelete(older, newer)) {
+      return newer;
     }
-
-    if (older instanceof HoodieSparkRecord) {
-      HoodieSparkRecord oldSparkRecord = (HoodieSparkRecord) older;
-      if (oldSparkRecord.isDelete(oldSchema, props)) {
-        // use natural order for delete record
-        return Option.of(Pair.of(newer, newSchema));
+    if (older.getOrderingValue().compareTo(newer.getOrderingValue()) > 0) {
+      if (older.isDelete() || newer.isDelete()) {
+        return older;
       }
+      HoodieSchema oldSchema = recordContext.getSchemaFromBufferRecord(older);
+      HoodieSchema newSchema = recordContext.getSchemaFromBufferRecord(newer);
+      return (BufferedRecord<T>) SparkRecordMergingUtils.mergePartialRecords((BufferedRecord<InternalRow>) newer, newSchema,
+          (BufferedRecord<InternalRow>) older, oldSchema, readerSchema, (RecordContext<InternalRow>) recordContext);
     } else {
-      if (older.getData() == null) {
-        // use natural order for delete record
-        return Option.of(Pair.of(newer, newSchema));
+      if (newer.isDelete() || older.isDelete()) {
+        return newer;
       }
-    }
-    if (older.getOrderingValue(oldSchema, props).compareTo(newer.getOrderingValue(newSchema, props)) > 0) {
-      return Option.of(SparkRecordMergingUtils.mergePartialRecords(
-          (HoodieSparkRecord) newer, newSchema, (HoodieSparkRecord) older, oldSchema, readerSchema, props));
-    } else {
-      return Option.of(SparkRecordMergingUtils.mergePartialRecords(
-          (HoodieSparkRecord) older, oldSchema, (HoodieSparkRecord) newer, newSchema, readerSchema, props));
+      HoodieSchema oldSchema = recordContext.getSchemaFromBufferRecord(older);
+      HoodieSchema newSchema = recordContext.getSchemaFromBufferRecord(newer);
+      return (BufferedRecord<T>) SparkRecordMergingUtils.mergePartialRecords((BufferedRecord<InternalRow>) older, oldSchema,
+          (BufferedRecord<InternalRow>) newer, newSchema, readerSchema, (RecordContext<InternalRow>) recordContext);
     }
   }
 }

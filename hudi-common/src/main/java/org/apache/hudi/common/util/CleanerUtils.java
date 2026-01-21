@@ -168,8 +168,16 @@ public class CleanerUtils {
   public static HoodieCleanerPlan getCleanerPlan(HoodieTableMetaClient metaClient, HoodieInstant cleanInstant)
       throws IOException {
     CleanPlanMigrator cleanPlanMigrator = new CleanPlanMigrator(metaClient);
+    cleanInstant = getCleanRequestInstant(metaClient, cleanInstant);
     HoodieCleanerPlan cleanerPlan = metaClient.getActiveTimeline().readCleanerPlan(cleanInstant);
     return cleanPlanMigrator.upgradeToLatest(cleanerPlan, cleanerPlan.getVersion());
+  }
+
+  public static HoodieInstant getCleanRequestInstant(HoodieTableMetaClient metaClient, HoodieInstant cleanInstant) {
+    if (!cleanInstant.isRequested()) {
+      return metaClient.getInstantGenerator().getRequestedInstant(cleanInstant);
+    }
+    return cleanInstant;
   }
 
   public static HoodieCleanerPlan getCleanerPlan(HoodieTableMetaClient metaClient, InputStream in)
@@ -182,7 +190,7 @@ public class CleanerUtils {
   /**
    * Convert list of cleanFileInfo instances to list of avro-generated HoodieCleanFileInfo instances.
    * @param cleanFileInfoList
-   * @return
+   * @return {@link List} of {@link HoodieCleanFileInfo}
    */
   public static List<HoodieCleanFileInfo> convertToHoodieCleanFileInfoList(List<CleanFileInfo> cleanFileInfoList) {
     return cleanFileInfoList.stream().map(CleanFileInfo::toHoodieFileCleanInfo).collect(Collectors.toList());

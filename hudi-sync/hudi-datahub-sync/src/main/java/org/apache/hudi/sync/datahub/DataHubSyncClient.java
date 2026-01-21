@@ -19,6 +19,7 @@
 
 package org.apache.hudi.sync.datahub;
 
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -33,9 +34,11 @@ import org.apache.hudi.sync.datahub.util.SchemaFieldsUtil;
 import com.linkedin.common.BrowsePathEntry;
 import com.linkedin.common.BrowsePathEntryArray;
 import com.linkedin.common.BrowsePathsV2;
+import com.linkedin.common.DataPlatformInstance;
 import com.linkedin.common.Status;
 import com.linkedin.common.SubTypes;
 import com.linkedin.common.UrnArray;
+import com.linkedin.common.urn.DataPlatformUrn;
 import com.linkedin.common.urn.DatasetUrn;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.container.Container;
@@ -44,14 +47,13 @@ import com.linkedin.data.template.StringArray;
 import com.linkedin.domain.Domains;
 import com.linkedin.metadata.aspect.patch.builder.DatasetPropertiesPatchBuilder;
 import com.linkedin.mxe.MetadataChangeProposal;
+import com.linkedin.schema.SchemaMetadata;
 import datahub.client.MetadataWriteResponse;
 import datahub.client.rest.RestEmitter;
 import datahub.event.MetadataChangeProposalWrapper;
 import io.datahubproject.schematron.converters.avro.AvroSchemaConverter;
-import org.apache.avro.Schema;
-import org.apache.parquet.schema.MessageType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -67,14 +69,18 @@ import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+@Slf4j
 public class DataHubSyncClient extends HoodieSyncClient {
 
-  private static final Logger LOG = LoggerFactory.getLogger(DataHubSyncClient.class);
-
   protected final DataHubSyncConfig config;
+  private final DataPlatformUrn dataPlatformUrn;
+  private final Option<String> dataPlatformInstance;
+  private final Option<Urn> dataPlatformInstanceUrn;
   private final DatasetUrn datasetUrn;
   private final Urn databaseUrn;
+  @Getter
   private final String tableName;
+  @Getter
   private final String databaseName;
   private static final Status SOFT_DELETE_FALSE = new Status().setRemoved(false);
 
@@ -83,6 +89,9 @@ public class DataHubSyncClient extends HoodieSyncClient {
     this.config = config;
     HoodieDataHubDatasetIdentifier datasetIdentifier =
             config.getDatasetIdentifier();
+    this.dataPlatformUrn = datasetIdentifier.getDataPlatformUrn();
+    this.dataPlatformInstance = datasetIdentifier.getDataPlatformInstance();
+    this.dataPlatformInstanceUrn = datasetIdentifier.getDataPlatformInstanceUrn();
     this.datasetUrn = datasetIdentifier.getDatasetUrn();
     this.databaseUrn = datasetIdentifier.getDatabaseUrn();
     this.tableName = datasetIdentifier.getTableName();
@@ -108,14 +117,14 @@ public class DataHubSyncClient extends HoodieSyncClient {
     if (lastCommitTime.isPresent()) {
       updateTableProperties(tableName, Collections.singletonMap(HOODIE_LAST_COMMIT_TIME_SYNC, lastCommitTime.get()));
     } else {
-      LOG.error("Failed to get last commit time");
+      log.error("Failed to get last commit time");
     }
 
     Option<String> lastCommitCompletionTime = getLastCommitCompletionTime();
     if (lastCommitCompletionTime.isPresent()) {
       updateTableProperties(tableName, Collections.singletonMap(HOODIE_LAST_COMMIT_COMPLETION_TIME_SYNC, lastCommitCompletionTime.get()));
     } else {
-      LOG.error("Failed to get last commit completion time");
+      log.error("Failed to get last commit completion time");
     }
   }
 
@@ -145,14 +154,14 @@ public class DataHubSyncClient extends HoodieSyncClient {
         throw new HoodieDataHubSyncException(
                 "Failed to sync properties for Dataset " + datasetUrn + ": " + tableProperties, e);
       } else {
-        LOG.error("Failed to sync properties for Dataset {}: {}", datasetUrn, tableProperties, e);
+        log.error("Failed to sync properties for Dataset {}: {}", datasetUrn, tableProperties, e);
         return false;
       }
     }
   }
 
   @Override
-  public void updateTableSchema(String tableName, MessageType schema, SchemaDifference schemaDifference) {
+  public void updateTableSchema(String tableName, HoodieSchema schema, SchemaDifference schemaDifference) {
     try (RestEmitter emitter = config.getRestEmitter()) {
       DataHubResponseLogger responseLogger = new DataHubResponseLogger();
 
@@ -188,7 +197,7 @@ public class DataHubSyncClient extends HoodieSyncClient {
           throw new HoodieDataHubSyncException("Failed to sync " + failures.size() + " operations", failures.get(0));
         } else {
           for (Throwable failure : failures) {
-            LOG.error("Failed to sync operation", failure);
+            log.error("Failed to sync operation", failure);
           }
         }
       }
@@ -196,7 +205,7 @@ public class DataHubSyncClient extends HoodieSyncClient {
       if (!config.suppressExceptions()) {
         throw new HoodieDataHubSyncException(String.format("Failed to sync metadata for dataset %s", tableName), e);
       } else {
-        LOG.error("Failed to sync metadata for dataset {}", tableName, e);
+        log.error("Failed to sync metadata for dataset {}", tableName, e);
       }
     }
   }
@@ -211,8 +220,8 @@ public class DataHubSyncClient extends HoodieSyncClient {
     return containerProposal;
   }
 
-  private MetadataChangeProposalWrapper createBrowsePathsAspect(Urn entityUrn, List<BrowsePathEntry> path) {
-    BrowsePathEntryArray browsePathEntryArray = new BrowsePathEntryArray(path);
+  private MetadataChangeProposalWrapper createBrowsePathsAspect(Urn entityUrn, List<BrowsePathEntry> paths) {
+    BrowsePathEntryArray browsePathEntryArray = new BrowsePathEntryArray(paths);
     MetadataChangeProposalWrapper browsePathsProposal = MetadataChangeProposalWrapper.builder()
             .entityType(entityUrn.getEntityType())
             .entityUrn(entityUrn)
@@ -220,6 +229,21 @@ public class DataHubSyncClient extends HoodieSyncClient {
             .aspect(new BrowsePathsV2().setPath(browsePathEntryArray))
             .build();
     return browsePathsProposal;
+  }
+
+  private MetadataChangeProposalWrapper createDataPlatformInstanceAspect(Urn entityUrn) {
+    DataPlatformInstance dataPlatformInstanceAspect = new DataPlatformInstance().setPlatform(this.dataPlatformUrn);
+    if (this.dataPlatformInstanceUrn.isPresent()) {
+      dataPlatformInstanceAspect.setInstance(dataPlatformInstanceUrn.get());
+    }
+
+    MetadataChangeProposalWrapper dataPlatformInstanceProposal = MetadataChangeProposalWrapper.builder()
+            .entityType(entityUrn.getEntityType())
+            .entityUrn(entityUrn)
+            .upsert()
+            .aspect(dataPlatformInstanceAspect)
+            .build();
+    return dataPlatformInstanceProposal;
   }
 
   private MetadataChangeProposalWrapper createDomainAspect(Urn entityUrn) {
@@ -233,7 +257,7 @@ public class DataHubSyncClient extends HoodieSyncClient {
               .build();
       return attachDomainProposal;
     } catch (URISyntaxException e) {
-      LOG.warn("Failed to create domain URN from string: {}", config.getDomainIdentifier());
+      log.warn("Failed to create domain URN from string: {}", config.getDomainIdentifier());
     }
     return null;
   }
@@ -246,10 +270,16 @@ public class DataHubSyncClient extends HoodieSyncClient {
             .aspect(new ContainerProperties().setName(databaseName))
             .build();
 
+    List<BrowsePathEntry> paths = dataPlatformInstanceUrn.map(dpiUrn -> Collections.singletonList(
+        new BrowsePathEntry().setUrn(dpiUrn).setId(dpiUrn.toString()))
+    ).orElse(Collections.emptyList());
+
     Stream<MetadataChangeProposalWrapper> resultStream = Stream.of(
             containerEntityProposal,
             createSubTypeAspect(databaseUrn, "Database"),
-            createBrowsePathsAspect(databaseUrn, Collections.emptyList()), createStatusAspect(databaseUrn),
+            createDataPlatformInstanceAspect(databaseUrn),
+            createBrowsePathsAspect(databaseUrn, paths),
+            createStatusAspect(databaseUrn),
             config.attachDomain() ? createDomainAspect(databaseUrn) : null
         ).filter(Objects::nonNull);
     return resultStream;
@@ -286,10 +316,10 @@ public class DataHubSyncClient extends HoodieSyncClient {
   }
 
   private MetadataChangeProposalWrapper createSchemaMetadataAspect(String tableName) {
-    Schema avroSchema = getAvroSchemaWithoutMetadataFields(metaClient);
+    HoodieSchema tableSchema = getTableSchemaWithoutMetadataFields(metaClient);
     AvroSchemaConverter avroSchemaConverter = AvroSchemaConverter.builder().build();
-    com.linkedin.schema.SchemaMetadata schemaMetadata = avroSchemaConverter.toDataHubSchema(
-            avroSchema,
+    SchemaMetadata schemaMetadata = avroSchemaConverter.toDataHubSchema(
+            tableSchema.toAvroSchema(),
             false,
             false,
             datasetUrn.getPlatformEntity(),
@@ -308,10 +338,20 @@ public class DataHubSyncClient extends HoodieSyncClient {
   }
 
   private Stream<MetadataChangeProposalWrapper> createDatasetEntity() {
+    BrowsePathEntry databasePath = new BrowsePathEntry().setUrn(databaseUrn).setId(databaseUrn.toString());
+    List<BrowsePathEntry> paths = dataPlatformInstanceUrn.map(dpiUrn -> {
+      List<BrowsePathEntry> list = new ArrayList<BrowsePathEntry>();
+      list.add(new BrowsePathEntry().setUrn(dpiUrn).setId(dpiUrn.toString()));
+      list.add(databasePath);
+      return list;
+    }
+    ).orElse(Collections.singletonList(databasePath));
+
     Stream<MetadataChangeProposalWrapper> result = Stream.of(
             createStatusAspect(datasetUrn),
             createSubTypeAspect(datasetUrn, "Table"),
-            createBrowsePathsAspect(datasetUrn, Collections.singletonList(new BrowsePathEntry().setUrn(databaseUrn).setId(databaseName))),
+            createDataPlatformInstanceAspect(datasetUrn),
+            createBrowsePathsAspect(datasetUrn, paths),
             createContainerAspect(datasetUrn, databaseUrn),
             createSchemaMetadataAspect(tableName),
             config.attachDomain() ? createDomainAspect(datasetUrn) : null
@@ -319,9 +359,9 @@ public class DataHubSyncClient extends HoodieSyncClient {
     return result;
   }
 
-  Schema getAvroSchemaWithoutMetadataFields(HoodieTableMetaClient metaClient) {
+  HoodieSchema getTableSchemaWithoutMetadataFields(HoodieTableMetaClient metaClient) {
     try {
-      return new TableSchemaResolver(metaClient).getTableAvroSchema(true);
+      return new TableSchemaResolver(metaClient).getTableSchema(true);
     } catch (Exception e) {
       throw new HoodieSyncException("Failed to read avro schema", e);
     }

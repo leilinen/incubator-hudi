@@ -20,66 +20,39 @@ package org.apache.hudi.table.format.mor;
 
 import org.apache.hudi.common.model.HoodieRecord;
 
-import org.apache.flink.table.types.logical.LogicalType;
+import lombok.Getter;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.Serializable;
-import java.util.Arrays;
 import java.util.List;
 
 /**
  * Statistics for merge on read table source.
  */
+@Getter
 public class MergeOnReadTableState implements Serializable {
 
   private static final long serialVersionUID = 1L;
 
   private final RowType rowType;
   private final RowType requiredRowType;
-  private final String avroSchema;
-  private final String requiredAvroSchema;
+  private final String tableSchema;
+  private final String requiredSchema;
   private final List<MergeOnReadInputSplit> inputSplits;
-  private final String[] pkFields;
   private final int operationPos;
 
   public MergeOnReadTableState(
       RowType rowType,
       RowType requiredRowType,
-      String avroSchema,
-      String requiredAvroSchema,
-      List<MergeOnReadInputSplit> inputSplits,
-      String[] pkFields) {
+      String tableSchema,
+      String requiredSchema,
+      List<MergeOnReadInputSplit> inputSplits) {
     this.rowType = rowType;
     this.requiredRowType = requiredRowType;
-    this.avroSchema = avroSchema;
-    this.requiredAvroSchema = requiredAvroSchema;
+    this.tableSchema = tableSchema;
+    this.requiredSchema = requiredSchema;
     this.inputSplits = inputSplits;
-    this.pkFields = pkFields;
     this.operationPos = rowType.getFieldIndex(HoodieRecord.OPERATION_METADATA_FIELD);
-  }
-
-  public RowType getRowType() {
-    return rowType;
-  }
-
-  public RowType getRequiredRowType() {
-    return requiredRowType;
-  }
-
-  public String getAvroSchema() {
-    return avroSchema;
-  }
-
-  public String getRequiredAvroSchema() {
-    return requiredAvroSchema;
-  }
-
-  public List<MergeOnReadInputSplit> getInputSplits() {
-    return inputSplits;
-  }
-
-  public int getOperationPos() {
-    return operationPos;
   }
 
   public int[] getRequiredPositions() {
@@ -88,30 +61,5 @@ public class MergeOnReadTableState implements Serializable {
         .map(fieldNames::indexOf)
         .mapToInt(i -> i)
         .toArray();
-  }
-
-  /**
-   * Get the primary key positions in required row type.
-   */
-  public int[] getPkOffsetsInRequired() {
-    final List<String> fieldNames = requiredRowType.getFieldNames();
-    return Arrays.stream(pkFields)
-        .map(fieldNames::indexOf)
-        .mapToInt(i -> i)
-        .toArray();
-  }
-
-  /**
-   * Returns the primary key fields logical type with given offsets.
-   *
-   * @param pkOffsets the pk offsets in required row type
-   * @return pk field logical types
-   * @see #getPkOffsetsInRequired()
-   */
-  public LogicalType[] getPkTypes(int[] pkOffsets) {
-    final LogicalType[] requiredTypes = requiredRowType.getFields().stream()
-        .map(RowType.RowField::getType).toArray(LogicalType[]::new);
-    return Arrays.stream(pkOffsets).mapToObj(offset -> requiredTypes[offset])
-        .toArray(LogicalType[]::new);
   }
 }

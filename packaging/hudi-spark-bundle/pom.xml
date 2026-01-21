@@ -19,7 +19,7 @@
   <parent>
     <artifactId>hudi</artifactId>
     <groupId>org.apache.hudi</groupId>
-    <version>1.1.0-SNAPSHOT</version>
+    <version>1.2.0-SNAPSHOT</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
   <modelVersion>4.0.0</modelVersion>
@@ -204,10 +204,6 @@
                     <exclude>META-INF/*.RSA</exclude>
                     <exclude>META-INF/services/javax.*</exclude>
                     <exclude>**/*.proto</exclude>
-                    <exclude>hbase-webapps/**</exclude>
-                    <!-- hbase-default.xml comes from hbase-common, hbase related classes used in hudi are in shaded
-                    pattern, the default classes in hbase-default.xml can cause ClassNotFoundException. -->
-                    <exclude>hbase-default.xml</exclude>
                   </excludes>
                 </filter>
               </filters>
@@ -286,6 +282,12 @@
       <artifactId>hive-jdbc</artifactId>
       <version>${hive.version}</version>
       <scope>${spark.bundle.hive.scope}</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>ch.qos.logback</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>

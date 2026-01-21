@@ -21,8 +21,9 @@ package org.apache.hudi.functional
 import org.apache.hudi.{DataSourceReadOptions, DataSourceWriteOptions}
 import org.apache.hudi.HoodieFileIndex.DataSkippingFailureMode
 import org.apache.hudi.common.config.HoodieMetadataConfig
+import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.table.timeline.{HoodieInstant, HoodieTimeline}
-import org.apache.hudi.common.testutils.RawTripTestPayload.recordsToStrings
+import org.apache.hudi.common.testutils.HoodieTestDataGenerator.recordsToStrings
 import org.apache.hudi.config.{HoodieClusteringConfig, HoodieWriteConfig}
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 
@@ -36,7 +37,7 @@ import org.junit.jupiter.params.provider.Arguments.arguments
 
 import scala.collection.JavaConverters._
 
-@Tag("functional")
+@Tag("functional-c")
 class TestLayoutOptimization extends HoodieSparkClientTestBase {
   var spark: SparkSession = _
 
@@ -62,7 +63,7 @@ class TestLayoutOptimization extends HoodieSparkClientTestBase {
     "hoodie.bulkinsert.shuffle.parallelism" -> "4",
     DataSourceWriteOptions.RECORDKEY_FIELD.key() -> "_row_key",
     DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> "partition",
-    DataSourceWriteOptions.PRECOMBINE_FIELD.key() -> "timestamp",
+    HoodieTableConfig.ORDERING_FIELDS.key() -> "timestamp",
     HoodieWriteConfig.TBL_NAME.key -> "hoodie_test"
   ) ++ metadataOpts
 

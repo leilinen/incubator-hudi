@@ -19,39 +19,46 @@
 
 package org.apache.hudi.common.table.read
 
-import org.apache.hudi.{DataSourceWriteOptions, SparkAdapterSupport, SparkFileFormatInternalRowReaderContext}
-import org.apache.hudi.DataSourceWriteOptions.{OPERATION, PRECOMBINE_FIELD, RECORDKEY_FIELD, TABLE_TYPE}
-import org.apache.hudi.common.config.{HoodieReaderConfig, RecordMergeMode}
-import org.apache.hudi.common.config.HoodieReaderConfig.FILE_GROUP_READER_ENABLED
+import org.apache.hudi.{AvroConversionUtils, DataSourceWriteOptions, HoodieSchemaConversionUtils, SparkAdapterSupport, SparkFileFormatInternalRowReaderContext}
+import org.apache.hudi.DataSourceWriteOptions.{OPERATION, RECORDKEY_FIELD, TABLE_TYPE}
+import org.apache.hudi.common.config.{HoodieReaderConfig, RecordMergeMode, TypedProperties}
 import org.apache.hudi.common.engine.HoodieReaderContext
 import org.apache.hudi.common.fs.FSUtils
-import org.apache.hudi.common.model.{FileSlice, HoodieRecord, WriteOperationType}
 import org.apache.hudi.common.model.DefaultHoodieRecordPayload.{DELETE_KEY, DELETE_MARKER}
-import org.apache.hudi.common.model.HoodieRecord.DEFAULT_ORDERING_VALUE
-import org.apache.hudi.common.table.HoodieTableMetaClient
+import org.apache.hudi.common.model.HoodieRecord
+import org.apache.hudi.common.schema.HoodieSchema
+import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient}
+import org.apache.hudi.common.table.read.TestHoodieFileGroupReaderBase.hoodieRecordsToIndexedRecords
 import org.apache.hudi.common.table.read.TestHoodieFileGroupReaderOnSpark.getFileCount
-import org.apache.hudi.common.testutils.{HoodieTestUtils, RawTripTestPayload}
-import org.apache.hudi.common.util.{Option => HOption}
+import org.apache.hudi.common.testutils.{HoodieTestDataGenerator, HoodieTestUtils}
+import org.apache.hudi.common.util.{Option => HOption, OrderingValues}
 import org.apache.hudi.config.{HoodieCompactionConfig, HoodieWriteConfig}
 import org.apache.hudi.storage.{StorageConfiguration, StoragePath}
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness
 
-import org.apache.avro.Schema
+import org.apache.avro.{Schema, SchemaBuilder}
+import org.apache.avro.generic.GenericRecord
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.{HoodieSparkKryoRegistrar, SparkConf}
-import org.apache.spark.sql.{Dataset, HoodieInternalRowUtils, HoodieUnsafeUtils, Row, SaveMode, SparkSession}
+import org.apache.spark.sql.{Dataset, HoodieInternalRowUtils, Row, SaveMode, SparkSession}
+import org.apache.spark.sql.avro.HoodieSparkSchemaConverters
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.datasources.parquet.SparkParquetReader
-import org.apache.spark.sql.functions.col
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
+import org.apache.spark.sql.execution.datasources.SparkColumnarFileReader
+import org.apache.spark.sql.hudi.MultipleColumnarFileFormatReader
+import org.apache.spark.sql.internal.SQLConf.LEGACY_RESPECT_NULLABILITY_IN_TEXT_DATASET_CONVERSION
+import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, DataType, DoubleType, FloatType, IntegerType, LongType, MapType, StringType, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.{Arguments, MethodSource}
 import org.mockito.Mockito
+import org.mockito.Mockito.when
 
 import java.util
+import java.util.Collections
+import java.util.stream.Collectors
 
 import scala.collection.JavaConverters._
 
@@ -78,6 +85,8 @@ class TestHoodieFileGroupReaderOnSpark extends TestHoodieFileGroupReaderBase[Int
     sparkConf.set("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar")
     sparkConf.set("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension")
     sparkConf.set("spark.sql.parquet.enableVectorizedReader", "false")
+    sparkConf.set("spark.sql.orc.enableVectorizedReader", "false")
+    sparkConf.set(LEGACY_RESPECT_NULLABILITY_IN_TEXT_DATASET_CONVERSION.key, "true")
     HoodieSparkKryoRegistrar.register(sparkConf)
     spark = SparkSession.builder.config(sparkConf).getOrCreate
   }
@@ -97,61 +106,99 @@ class TestHoodieFileGroupReaderOnSpark extends TestHoodieFileGroupReaderBase[Int
     tempDir.toAbsolutePath.toUri.toString
   }
 
-  override def getHoodieReaderContext(tablePath: String, avroSchema: Schema, storageConf: StorageConfiguration[_], metaClient: HoodieTableMetaClient): HoodieReaderContext[InternalRow] = {
-    val reader = sparkAdapter.createParquetFileReader(vectorized = false, spark.sessionState.conf, Map.empty, storageConf.unwrapAs(classOf[Configuration]))
-    new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, getStorageConf)
+  override def getHoodieReaderContext(tablePath: String, schema: HoodieSchema, storageConf: StorageConfiguration[_], metaClient: HoodieTableMetaClient): HoodieReaderContext[InternalRow] = {
+    val parquetReader = sparkAdapter.createParquetFileReader(vectorized = false, spark.sessionState.conf, Map.empty, storageConf.unwrapAs(classOf[Configuration]))
+    val dataSchema = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(schema)
+    val orcReader = sparkAdapter.createOrcFileReader(vectorized = false, spark.sessionState.conf, Map.empty, storageConf.unwrapAs(classOf[Configuration]), dataSchema)
+    val multiFormatReader = new MultipleColumnarFileFormatReader(parquetReader, orcReader)
+    new SparkFileFormatInternalRowReaderContext(multiFormatReader, Seq.empty, Seq.empty, getStorageConf, metaClient.getTableConfig)
   }
 
-  override def commitToTable(recordList: util.List[HoodieRecord[_]], operation: String, options: util.Map[String, String]): Unit = {
-    val recs = RawTripTestPayload.recordsToStrings(recordList)
-    val inputDF: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(recs.asScala.toList, 2))
+  override def commitToTable(recordList: util.List[HoodieRecord[_]],
+                             operation: String,
+                             firstCommit: Boolean,
+                             options: util.Map[String, String],
+                             schemaStr: String): Unit = {
+    val schema = HoodieSchema.parse(schemaStr)
+    val genericRecords = spark.sparkContext.parallelize((hoodieRecordsToIndexedRecords(recordList, schema)
+      .stream().map[GenericRecord](entry => entry.getValue.asInstanceOf[GenericRecord])
+      .collect(Collectors.toList[GenericRecord])).asScala.toSeq, 2)
+    val inputDF: Dataset[Row] = AvroConversionUtils.createDataFrame(genericRecords, schemaStr, spark);
 
     inputDF.write.format("hudi")
       .options(options)
       .option("hoodie.compact.inline", "false") // else fails due to compaction & deltacommit instant times being same
       .option("hoodie.datasource.write.operation", operation)
       .option("hoodie.datasource.write.table.type", "MERGE_ON_READ")
-      .mode(if (operation.equalsIgnoreCase(WriteOperationType.INSERT.value())) SaveMode.Overwrite
-      else SaveMode.Append)
+      .mode(if (firstCommit) SaveMode.Overwrite else SaveMode.Append)
       .save(getBasePath)
   }
 
   override def getCustomPayload: String = classOf[CustomPayloadForTesting].getName
 
-  override def assertRecordsEqual(schema: Schema, expected: InternalRow, actual: InternalRow): Unit = {
+  override def assertRecordsEqual(schema: HoodieSchema, expected: InternalRow, actual: InternalRow): Unit = {
     assertEquals(expected.numFields, actual.numFields)
-    val expectedStruct = sparkAdapter.getAvroSchemaConverters.toSqlType(schema)._1.asInstanceOf[StructType]
-    expected.toSeq(expectedStruct).zip(actual.toSeq(expectedStruct)).foreach( converted => {
-      assertEquals(converted._1, converted._2)
-    })
+    val expectedStruct = HoodieSparkSchemaConverters.toSqlType(schema)._1.asInstanceOf[StructType]
+
+    expected.toSeq(expectedStruct).zip(actual.toSeq(expectedStruct)).zipWithIndex.foreach {
+      case ((v1, v2), i) =>
+        val fieldType = expectedStruct(i).dataType
+
+        (v1, v2, fieldType) match {
+          case (a1: Array[Byte], a2: Array[Byte], _) =>
+            assert(java.util.Arrays.equals(a1, a2), s"Mismatch at field $i: expected ${a1.mkString(",")} but got ${a2.mkString(",")}")
+
+          case (m1: MapData, m2: MapData, MapType(keyType, valueType, _)) =>
+            val map1 = mapDataToScalaMap(m1, keyType, valueType)
+            val map2 = mapDataToScalaMap(m2, keyType, valueType)
+            assertEquals(map1, map2, s"Mismatch at field $i: maps not equal")
+
+          case _ =>
+            assertEquals(v1, v2, s"Mismatch at field $i")
+        }
+    }
+  }
+
+  def mapDataToScalaMap(mapData: MapData, keyType: DataType, valueType: DataType): Map[Any, Any] = {
+    val keys = mapData.keyArray()
+    val values = mapData.valueArray()
+    (0 until mapData.numElements()).map { i =>
+      val k = extractValue(keys, i, keyType)
+      val v = extractValue(values, i, valueType)
+      k -> v
+    }.toMap
+  }
+
+  def extractValue(array: ArrayData, index: Int, dt: DataType): Any = dt match {
+    case IntegerType => array.getInt(index)
+    case LongType    => array.getLong(index)
+    case StringType  => array.getUTF8String(index).toString
+    case DoubleType  => array.getDouble(index)
+    case FloatType   => array.getFloat(index)
+    case BooleanType => array.getBoolean(index)
+    case BinaryType  => array.getBinary(index)
+    // Extend this to support StructType, ArrayType, etc. if needed
+    case other       => throw new UnsupportedOperationException(s"Unsupported type: $other")
   }
 
   @Test
   def testGetOrderingValue(): Unit = {
-    val reader = Mockito.mock(classOf[SparkParquetReader])
-    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, getStorageConf)
+    val reader = Mockito.mock(classOf[SparkColumnarFileReader])
+    val tableConfig = Mockito.mock(classOf[HoodieTableConfig])
+    Mockito.when(tableConfig.populateMetaFields()).thenReturn(true)
+    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, getStorageConf, tableConfig)
     val orderingFieldName = "col2"
     val avroSchema = new Schema.Parser().parse(
       "{\"type\": \"record\",\"name\": \"test\",\"namespace\": \"org.apache.hudi\",\"fields\": ["
         + "{\"name\": \"col1\", \"type\": \"string\" },"
         + "{\"name\": \"col2\", \"type\": \"long\" },"
         + "{ \"name\": \"col3\", \"type\": [\"null\", \"string\"], \"default\": null}]}")
-    val row = InternalRow("item", 1000L, "blue")
-    val metadataMap = Map(HoodieReaderContext.INTERNAL_META_ORDERING_FIELD -> 100L)
-    assertEquals(100L, sparkReaderContext.getOrderingValue(
-      HOption.empty(), metadataMap.asJava.asInstanceOf[java.util.Map[String, Object]],
-      avroSchema, HOption.of(orderingFieldName)))
-    assertEquals(DEFAULT_ORDERING_VALUE, sparkReaderContext.getOrderingValue(
-      HOption.empty(), Map().asJava.asInstanceOf[java.util.Map[String, Object]],
-      avroSchema, HOption.of(orderingFieldName)))
-    assertEquals(DEFAULT_ORDERING_VALUE, sparkReaderContext.getOrderingValue(
-      HOption.of(row), Map().asJava.asInstanceOf[java.util.Map[String, Object]],
-      avroSchema, HOption.empty()))
+    val row = InternalRow("item", 1000L, UTF8String.fromString("blue"))
     testGetOrderingValue(sparkReaderContext, row, avroSchema, orderingFieldName, 1000L)
     testGetOrderingValue(
-      sparkReaderContext, row, avroSchema, "col3", UTF8String.fromString("blue"))
+      sparkReaderContext, row, avroSchema, "col3", sparkAdapter.getUTF8StringFactory.wrapUTF8String(UTF8String.fromString("blue")))
     testGetOrderingValue(
-      sparkReaderContext, row, avroSchema, "non_existent_col", DEFAULT_ORDERING_VALUE)
+      sparkReaderContext, row, avroSchema, "non_existent_col", OrderingValues.getDefault)
   }
 
   val expectedEventTimeBased: Seq[(Int, String, String, String, Double, String)] = Seq(
@@ -197,7 +244,7 @@ class TestHoodieFileGroupReaderOnSpark extends TestHoodieFileGroupReaderBase[Int
     val inserts = spark.createDataFrame(data).toDF(columns: _*)
     inserts.write.format("hudi").
       option(RECORDKEY_FIELD.key(), "key").
-      option(PRECOMBINE_FIELD.key(), "ts").
+      option(HoodieTableConfig.ORDERING_FIELDS.key(), "ts").
       option(TABLE_TYPE.key(), tableType).
       option(DataSourceWriteOptions.TABLE_NAME.key(), "test_table").
       option(HoodieCompactionConfig.INLINE_COMPACT.key(), "false").
@@ -264,11 +311,130 @@ class TestHoodieFileGroupReaderOnSpark extends TestHoodieFileGroupReaderBase[Int
                                    avroSchema: Schema,
                                    orderingColumn: String,
                                    expectedOrderingValue: Comparable[_]): Unit = {
-    val metadataMap = new util.HashMap[String, Object]()
-    assertEquals(expectedOrderingValue, sparkReaderContext.getOrderingValue(
-      HOption.of(row), metadataMap, avroSchema, HOption.of(orderingColumn)))
-    assertEquals(expectedOrderingValue,
-      metadataMap.get(HoodieReaderContext.INTERNAL_META_ORDERING_FIELD))
+    assertEquals(expectedOrderingValue, sparkReaderContext.getRecordContext.getOrderingValue(row, HoodieSchema.fromAvroSchema(avroSchema), Collections.singletonList(orderingColumn)))
+  }
+
+  @Test
+  def getRecordKeyFromMetadataFields(): Unit = {
+    val reader = Mockito.mock(classOf[SparkColumnarFileReader])
+    val tableConfig = Mockito.mock(classOf[HoodieTableConfig])
+    val storageConf = Mockito.mock(classOf[StorageConfiguration[_]])
+    when(tableConfig.populateMetaFields()).thenReturn(true)
+    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, storageConf, tableConfig)
+    val schema = SchemaBuilder.builder()
+      .record("test")
+      .fields()
+      .requiredString(HoodieRecord.RECORD_KEY_METADATA_FIELD)
+      .optionalString("field2")
+      .endRecord()
+    val key = "my_key"
+    val row = InternalRow.fromSeq(Seq(UTF8String.fromString(key), UTF8String.fromString("value2")))
+    assertEquals(key, sparkReaderContext.getRecordContext().getRecordKey(row, HoodieSchema.fromAvroSchema(schema)))
+  }
+
+  @Test
+  def getRecordKeySingleKey(): Unit = {
+    val reader = Mockito.mock(classOf[SparkColumnarFileReader])
+    val tableConfig = Mockito.mock(classOf[HoodieTableConfig])
+    when(tableConfig.populateMetaFields()).thenReturn(false)
+    when(tableConfig.getRecordKeyFields).thenReturn(HOption.of(Array("field1")))
+    val storageConf = Mockito.mock(classOf[StorageConfiguration[_]])
+    val props = new TypedProperties
+    props.put(HoodieTableConfig.RECORDKEY_FIELDS.key(), "field1,field2")
+    when(tableConfig.getProps).thenReturn(props)
+    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, storageConf, tableConfig)
+    val schema = SchemaBuilder.builder()
+      .record("test")
+      .fields()
+      .requiredString("field1")
+      .optionalString("field2")
+      .endRecord()
+    val key = "key"
+    val row = InternalRow.fromSeq(Seq(UTF8String.fromString(key), UTF8String.fromString("other")))
+    assertEquals(key, sparkReaderContext.getRecordContext().getRecordKey(row, HoodieSchema.fromAvroSchema(schema)))
+  }
+
+  @Test
+  def getRecordKeyWithMultipleKeys(): Unit = {
+    val reader = Mockito.mock(classOf[SparkColumnarFileReader])
+    val tableConfig = Mockito.mock(classOf[HoodieTableConfig])
+    when(tableConfig.populateMetaFields()).thenReturn(false)
+    when(tableConfig.getRecordKeyFields).thenReturn(HOption.of(Array("outer1.field1", "outer1.field2", "outer1.field3")))
+    val storageConf = Mockito.mock(classOf[StorageConfiguration[_]])
+    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, storageConf, tableConfig)
+    val schema: _root_.org.apache.avro.Schema = buildMultiLevelSchema
+    val key = "outer1.field1:compound,outer1.field2:__empty__,outer1.field3:__null__"
+    val innerRow = InternalRow.fromSeq(Seq(UTF8String.fromString("compound"), UTF8String.fromString(""), null))
+    val row = InternalRow.fromSeq(Seq(innerRow, UTF8String.fromString("value2")))
+    assertEquals(key, sparkReaderContext.getRecordContext.getRecordKey(row, HoodieSchema.fromAvroSchema(schema)))
+  }
+
+  @Test
+  def getNestedValue(): Unit = {
+    val reader = Mockito.mock(classOf[SparkColumnarFileReader])
+    val tableConfig = Mockito.mock(classOf[HoodieTableConfig])
+    when(tableConfig.populateMetaFields()).thenReturn(true)
+    val storageConf = Mockito.mock(classOf[StorageConfiguration[_]])
+    val sparkReaderContext = new SparkFileFormatInternalRowReaderContext(reader, Seq.empty, Seq.empty, storageConf, tableConfig)
+    val schema: Schema = buildMultiLevelSchema
+    val innerRow = InternalRow.fromSeq(Seq(UTF8String.fromString("nested_value"), UTF8String.fromString(""), null))
+    val row = InternalRow.fromSeq(Seq(innerRow, UTF8String.fromString("value2")))
+    assertEquals("nested_value", sparkReaderContext.getRecordContext().getValue(row, HoodieSchema.fromAvroSchema(schema), "outer1.field1").toString)
+  }
+
+  private def buildMultiLevelSchema = {
+    val innerSchema = SchemaBuilder.builder()
+      .record("inner")
+      .fields()
+      .requiredString("field1")
+      .optionalString("field2")
+      .optionalString("field3")
+      .endRecord()
+    val schema = Schema.createRecord("outer", null, null, false);
+    schema.setFields(util.Arrays.asList(
+      new Schema.Field("outer1", innerSchema, null, null),
+      new Schema.Field("outer2", Schema.create(Schema.Type.STRING), null, null)
+    ))
+    schema
+  }
+
+  override def assertRecordMatchesSchema(schema: HoodieSchema, record: InternalRow): Unit = {
+    val structType = HoodieInternalRowUtils.getCachedSchema(schema)
+    assertRecordMatchesSchema(structType, record)
+  }
+
+  private def assertRecordMatchesSchema(structType: StructType, record: InternalRow): Unit = {
+    val values = record.toSeq(structType)
+    structType.zip(values).foreach { r =>
+      r._1.dataType match {
+        case struct: StructType => assertRecordMatchesSchema(struct, r._2.asInstanceOf[InternalRow])
+        case array: ArrayType => assertArrayMatchesSchema(array.elementType, r._2.asInstanceOf[ArrayData])
+        case map: MapType => asserMapMatchesSchema(map, r._2.asInstanceOf[MapData])
+        case _ =>
+      }
+    }
+  }
+
+  private def assertArrayMatchesSchema(schema: DataType, array: ArrayData): Unit = {
+    val arrayValues = array.toSeq[Any](schema)
+    schema match {
+      case structType: StructType =>
+        arrayValues.foreach(v => assertRecordMatchesSchema(structType, v.asInstanceOf[InternalRow]))
+      case arrayType: ArrayType =>
+        arrayValues.foreach(v => assertArrayMatchesSchema(arrayType.elementType, v.asInstanceOf[ArrayData]))
+      case mapType: MapType =>
+        arrayValues.foreach(v => asserMapMatchesSchema(mapType, v.asInstanceOf[MapData]))
+      case _ =>
+    }
+  }
+
+  private def asserMapMatchesSchema(schema: MapType, map: MapData): Unit = {
+    assertArrayMatchesSchema(schema.keyType, map.keyArray())
+    assertArrayMatchesSchema(schema.valueType, map.valueArray())
+  }
+
+  override def getSchemaEvolutionConfigs: HoodieTestDataGenerator.SchemaEvolutionConfigs = {
+    new HoodieTestDataGenerator.SchemaEvolutionConfigs()
   }
 }
 

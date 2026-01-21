@@ -31,8 +31,8 @@ import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.index.bucket.partition.PartitionBucketIndexRule;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.concurrent.Immutable;
 
@@ -47,25 +47,22 @@ import static org.apache.hudi.common.config.HoodieStorageConfig.BLOOM_FILTER_DYN
 import static org.apache.hudi.common.config.HoodieStorageConfig.BLOOM_FILTER_FPP_VALUE;
 import static org.apache.hudi.common.config.HoodieStorageConfig.BLOOM_FILTER_NUM_ENTRIES_VALUE;
 import static org.apache.hudi.common.config.HoodieStorageConfig.BLOOM_FILTER_TYPE;
-import static org.apache.hudi.config.HoodieHBaseIndexConfig.GET_BATCH_SIZE;
-import static org.apache.hudi.config.HoodieHBaseIndexConfig.PUT_BATCH_SIZE;
-import static org.apache.hudi.config.HoodieHBaseIndexConfig.TABLENAME;
-import static org.apache.hudi.config.HoodieHBaseIndexConfig.ZKPORT;
-import static org.apache.hudi.config.HoodieHBaseIndexConfig.ZKQUORUM;
 import static org.apache.hudi.index.HoodieIndex.IndexType.BLOOM;
 import static org.apache.hudi.index.HoodieIndex.IndexType.BUCKET;
 import static org.apache.hudi.index.HoodieIndex.IndexType.FLINK_STATE;
 import static org.apache.hudi.index.HoodieIndex.IndexType.GLOBAL_BLOOM;
+import static org.apache.hudi.index.HoodieIndex.IndexType.GLOBAL_RECORD_LEVEL_INDEX;
 import static org.apache.hudi.index.HoodieIndex.IndexType.GLOBAL_SIMPLE;
-import static org.apache.hudi.index.HoodieIndex.IndexType.HBASE;
 import static org.apache.hudi.index.HoodieIndex.IndexType.INMEMORY;
 import static org.apache.hudi.index.HoodieIndex.IndexType.RECORD_INDEX;
+import static org.apache.hudi.index.HoodieIndex.IndexType.RECORD_LEVEL_INDEX;
 import static org.apache.hudi.index.HoodieIndex.IndexType.SIMPLE;
 
 /**
  * Indexing related config.
  */
 @Immutable
+@Slf4j
 @ConfigClassProperty(name = "Common Index Configs",
     groupName = ConfigGroups.Names.WRITE_CLIENT,
     subGroupName = ConfigGroups.SubGroupNames.INDEX,
@@ -73,14 +70,12 @@ import static org.apache.hudi.index.HoodieIndex.IndexType.SIMPLE;
     description = "")
 public class HoodieIndexConfig extends HoodieConfig {
 
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieIndexConfig.class);
-
   public static final ConfigProperty<String> INDEX_TYPE = ConfigProperty
       .key("hoodie.index.type")
       // Builder#getDefaultIndexType has already set it according to engine type
       .noDefaultValue()
-      .withValidValues(HBASE.name(), INMEMORY.name(), BLOOM.name(), GLOBAL_BLOOM.name(),
-          SIMPLE.name(), GLOBAL_SIMPLE.name(), BUCKET.name(), FLINK_STATE.name(), RECORD_INDEX.name())
+      .withValidValues(INMEMORY.name(), BLOOM.name(), GLOBAL_BLOOM.name(), SIMPLE.name(), GLOBAL_SIMPLE.name(),
+          BUCKET.name(), FLINK_STATE.name(), RECORD_INDEX.name(), RECORD_LEVEL_INDEX.name(), GLOBAL_RECORD_LEVEL_INDEX.name())
       .withDocumentation(HoodieIndex.IndexType.class);
 
 
@@ -147,6 +142,20 @@ public class HoodieIndexConfig extends HoodieConfig {
       .withDocumentation("Only applies if index type is BLOOM. "
           + "When true, bucketized bloom filtering is enabled. "
           + "This reduces skew seen in sort based bloom index lookup");
+
+  public static final ConfigProperty<String> BLOOM_INDEX_BUCKETIZED_CHECKING_ENABLE_DYNAMIC_PARALLELISM = ConfigProperty
+      .key("hoodie.bloom.index.bucketized.checking.enable.dynamic.parallelism")
+      .defaultValue("false")
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Only applies if index type is BLOOM and the bucketized bloom filtering "
+          + "is enabled. When true, the index parallelism is determined by the number of file "
+          + "groups to look up and the number of keys per bucket to split comparisons within a "
+          + "file group; otherwise, the index parallelism is limited by the input parallelism. "
+          + "PLEASE NOTE that if the bloom index parallelism (" + BLOOM_INDEX_PARALLELISM.key()
+          + ") is configured, the bloom index parallelism takes effect instead of the input "
+          + "parallelism and always limits the number of buckets calculated based on the number "
+          + "of keys per bucket in the bucketized bloom filtering.");
 
   public static final ConfigProperty<String> BLOOM_INDEX_FILE_GROUP_ID_KEY_SORTING = ConfigProperty
       .key("hoodie.bloom.index.fileid.key.sorting.enable")
@@ -287,6 +296,12 @@ public class HoodieIndexConfig extends HoodieConfig {
       .withDocumentation("Only applies if index type is BUCKET. Determine the number of buckets in the hudi table, "
           + "and each partition is divided to N buckets.");
 
+  public static final ConfigProperty<Boolean> BUCKET_PARTITIONER = ConfigProperty
+      .key("hoodie.bucket.index.remote.partitioner.enable")
+      .defaultValue(false)
+      .withDocumentation("Use Remote Partitioner using centralized allocation of partition "
+          + "IDs to do repartition based on bucket aiming to resolve data skew. Default local hash partitioner");
+
   public static final ConfigProperty<String> BUCKET_INDEX_PARTITION_RULE_TYPE = ConfigProperty
       .key("hoodie.bucket.index.partition.rule.type")
       .defaultValue(PartitionBucketIndexRule.REGEX.name)
@@ -363,23 +378,6 @@ public class HoodieIndexConfig extends HoodieConfig {
       .defaultValue(true)
       .withDocumentation("Control if table with bucket index use bucket query or not");
 
-  /**
-   * Deprecated configs. These are now part of {@link HoodieHBaseIndexConfig}.
-   */
-  @Deprecated
-  public static final String HBASE_ZKQUORUM_PROP = ZKQUORUM.key();
-  @Deprecated
-  public static final String HBASE_ZKPORT_PROP = ZKPORT.key();
-  @Deprecated
-  public static final String HBASE_ZK_ZNODEPARENT = HoodieHBaseIndexConfig.ZK_NODE_PATH.key();
-  @Deprecated
-  public static final String HBASE_TABLENAME_PROP = TABLENAME.key();
-  @Deprecated
-  public static final String HBASE_GET_BATCH_SIZE_PROP = GET_BATCH_SIZE.key();
-  @Deprecated
-  public static final String HBASE_PUT_BATCH_SIZE_PROP = PUT_BATCH_SIZE.key();
-  @Deprecated
-  public static final String DEFAULT_HBASE_BATCH_SIZE = "100";
   /** @deprecated Use {@link #INDEX_TYPE} and its methods instead */
   @Deprecated
   public static final String INDEX_TYPE_PROP = INDEX_TYPE.key();
@@ -569,6 +567,7 @@ public class HoodieIndexConfig extends HoodieConfig {
 
   public static class Builder {
 
+    @Getter
     private EngineType engineType = EngineType.SPARK;
     private final HoodieIndexConfig hoodieIndexConfig = new HoodieIndexConfig();
 
@@ -596,11 +595,6 @@ public class HoodieIndexConfig extends HoodieConfig {
 
     public Builder withIndexClass(String indexClass) {
       hoodieIndexConfig.setValue(INDEX_CLASS_NAME, indexClass);
-      return this;
-    }
-
-    public Builder withHBaseIndexConfig(HoodieHBaseIndexConfig hBaseIndexConfig) {
-      hoodieIndexConfig.getProps().putAll(hBaseIndexConfig.getProps());
       return this;
     }
 
@@ -714,6 +708,11 @@ public class HoodieIndexConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder enableBucketRemotePartitioner(boolean enableRemotePartitioner) {
+      hoodieIndexConfig.setValue(BUCKET_PARTITIONER, String.valueOf(enableRemotePartitioner));
+      return this;
+    }
+
     public Builder withBucketMinNum(int bucketMinNum) {
       hoodieIndexConfig.setValue(BUCKET_INDEX_MIN_NUM_BUCKETS, String.valueOf(bucketMinNum));
       return this;
@@ -761,10 +760,6 @@ public class HoodieIndexConfig extends HoodieConfig {
       }
     }
 
-    public EngineType getEngineType() {
-      return engineType;
-    }
-
     private void validateBucketIndexConfig() {
       if (hoodieIndexConfig.getString(INDEX_TYPE).equalsIgnoreCase(HoodieIndex.IndexType.BUCKET.toString())) {
         // check the bucket index hash field
@@ -788,14 +783,14 @@ public class HoodieIndexConfig extends HoodieConfig {
         if (StringUtils.isNullOrEmpty(hoodieIndexConfig.getString(BUCKET_INDEX_MAX_NUM_BUCKETS))) {
           hoodieIndexConfig.setValue(BUCKET_INDEX_MAX_NUM_BUCKETS, Integer.toString(bucketNum));
         } else if (hoodieIndexConfig.getInt(BUCKET_INDEX_MAX_NUM_BUCKETS) < bucketNum) {
-          LOG.warn("Maximum bucket number is smaller than bucket number, maximum: " + hoodieIndexConfig.getInt(BUCKET_INDEX_MAX_NUM_BUCKETS) + ", bucketNum: " + bucketNum);
+          log.warn("Maximum bucket number is smaller than bucket number, maximum: {}, bucketNum: {}", hoodieIndexConfig.getInt(BUCKET_INDEX_MAX_NUM_BUCKETS), bucketNum);
           hoodieIndexConfig.setValue(BUCKET_INDEX_MAX_NUM_BUCKETS, Integer.toString(bucketNum));
         }
 
         if (StringUtils.isNullOrEmpty(hoodieIndexConfig.getString(BUCKET_INDEX_MIN_NUM_BUCKETS))) {
           hoodieIndexConfig.setValue(BUCKET_INDEX_MIN_NUM_BUCKETS, Integer.toString(bucketNum));
         } else if (hoodieIndexConfig.getInt(BUCKET_INDEX_MIN_NUM_BUCKETS) > bucketNum) {
-          LOG.warn("Minimum bucket number is larger than the bucket number, minimum: " + hoodieIndexConfig.getInt(BUCKET_INDEX_MIN_NUM_BUCKETS) + ", bucketNum: " + bucketNum);
+          log.warn("Minimum bucket number is larger than the bucket number, minimum: {}, bucketNum: {}", hoodieIndexConfig.getInt(BUCKET_INDEX_MIN_NUM_BUCKETS), bucketNum);
           hoodieIndexConfig.setValue(BUCKET_INDEX_MIN_NUM_BUCKETS, Integer.toString(bucketNum));
         }
       }

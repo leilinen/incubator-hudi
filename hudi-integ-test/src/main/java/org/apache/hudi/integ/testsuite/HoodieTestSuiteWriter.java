@@ -35,15 +35,15 @@ import org.apache.hudi.integ.testsuite.dag.nodes.DagNode;
 import org.apache.hudi.integ.testsuite.dag.nodes.RollbackNode;
 import org.apache.hudi.integ.testsuite.dag.nodes.ScheduleCompactNode;
 import org.apache.hudi.integ.testsuite.writer.DeltaWriteStats;
+import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.rdd.RDD;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.Arrays;
@@ -52,9 +52,16 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
+/**
+ * Note: Getters are manually defined instead of using Lombok's @Getter annotation.
+ * This is because Scala classes in this module reference these getters, and the Scala
+ * compiler runs before Lombok annotation processing. Using @Getter would cause Scala
+ * compilation errors as the generated methods wouldn't be visible yet. To avoid
+ * complicating the build with custom compilation order configuration, we use explicit
+ * getter methods that are available during Scala compilation.
+ */
+@Slf4j
 public abstract class HoodieTestSuiteWriter implements Serializable {
-
-  private static Logger log = LoggerFactory.getLogger(HoodieTestSuiteWriter.class);
 
   protected HoodieDeltaStreamerWrapper deltaStreamerWrapper;
   protected HoodieWriteConfig writeConfig;
@@ -93,9 +100,8 @@ public abstract class HoodieTestSuiteWriter implements Serializable {
 
     HoodieWriteConfig.Builder builder =
         HoodieWriteConfig.newBuilder().combineInput(true, true).withPath(cfg.targetBasePath)
-            .withAutoCommit(false)
             .withPayloadConfig(HoodiePayloadConfig.newBuilder()
-                .withPayloadOrderingField(cfg.sourceOrderingField)
+                .withPayloadOrderingFields(cfg.sourceOrderingFields)
                 .withPayloadClass(cfg.payloadClassName)
                 .build())
             .forTable(cfg.targetTableName)
@@ -130,7 +136,7 @@ public abstract class HoodieTestSuiteWriter implements Serializable {
 
   public abstract JavaRDD<WriteStatus> bulkInsert(Option<String> instantTime) throws Exception;
 
-  public abstract JavaRDD<WriteStatus> compact(Option<String> instantTime) throws Exception;
+  public abstract HoodieWriteMetadata<JavaRDD<WriteStatus>> compact(Option<String> instantTime) throws Exception;
 
   public abstract void inlineClustering() throws Exception;
 
@@ -139,8 +145,7 @@ public abstract class HoodieTestSuiteWriter implements Serializable {
   public abstract void commit(JavaRDD<WriteStatus> records, JavaRDD<DeltaWriteStats> generatedDataStats,
                               Option<String> instantTime);
 
-  public abstract void commitCompaction(JavaRDD<WriteStatus> records, JavaRDD<DeltaWriteStats> generatedDataStats,
-                                        Option<String> instantTime) throws Exception;
+  public abstract void commitCompaction(Option<String> instantTime, HoodieWriteMetadata<JavaRDD<WriteStatus>> writeMetadata) throws Exception;
 
   public SparkRDDWriteClient getWriteClient(DagNode dagNode) throws IllegalAccessException {
     if (cfg.useDeltaStreamer & !allowWriteClientAccess(dagNode)) {

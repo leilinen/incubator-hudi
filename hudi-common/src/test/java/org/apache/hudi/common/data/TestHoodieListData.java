@@ -19,12 +19,14 @@
 
 package org.apache.hudi.common.data;
 
+import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.Pair;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -36,6 +38,8 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 class TestHoodieListData {
 
@@ -93,5 +97,52 @@ class TestHoodieListData {
 
     emptyListData = HoodieListData.lazy(Collections.emptyList());
     assertTrue(emptyListData.isEmpty());
+  }
+
+  @Test
+  void testCloseableIterator() {
+    ClosableIterator<String> iterator = spy(ClosableIterator.wrap(Arrays.asList("value1", "value2").iterator()));
+    HoodieData<String> listData = HoodieListData.lazy(iterator);
+    List<String> values = listData.collectAsList();
+    assertEquals(Arrays.asList("value1", "value2"), values);
+    // Ensure the iterator is closed after use
+    verify(iterator).close();
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testMapPartitionsWithCloseable(boolean isLazy) {
+    String partition1 = "partition1";
+    String partition2 = "partition2";
+    HoodieData<String> input = new HoodieListData<>(Stream.of(partition1, partition2), isLazy);
+    CloseValidationIterator<String> iterator = new CloseValidationIterator<>(Collections.singletonList("value").iterator());
+    assertEquals(1, input.mapPartitions(partition -> iterator, true).collectAsList().size());
+    assertTrue(iterator.isClosed());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testFlatMapWithCloseable(boolean isLazy) {
+    String partition1 = "partition1";
+    String partition2 = "partition2";
+    CloseValidationIterator<String> iterator1 = new CloseValidationIterator<>(Collections.singletonList("value").iterator());
+    CloseValidationIterator<String> iterator2 = new CloseValidationIterator<>(Collections.singletonList("value").iterator());
+    HoodieData<String> input = new HoodieListData<>(Stream.of(partition1, partition2), isLazy);
+    assertEquals(2, input.flatMap(partition -> partition.equals(partition1) ? iterator1 : iterator2).collectAsList().size());
+    assertTrue(iterator1.isClosed());
+    assertTrue(iterator2.isClosed());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testFlatMapToPairWithCloseable(boolean isLazy) {
+    String partition1 = "partition1";
+    String partition2 = "partition2";
+    HoodieData<String> input = new HoodieListData<>(Stream.of(partition1, partition2), isLazy);
+    CloseValidationIterator<Pair<String, String>> iterator1 = new CloseValidationIterator<>(Collections.singletonList(Pair.of("1", "value")).iterator());
+    CloseValidationIterator<Pair<String, String>> iterator2 = new CloseValidationIterator<>(Collections.singletonList(Pair.of("2", "value")).iterator());
+    assertEquals(2, input.flatMapToPair(partition -> partition.equals(partition1) ? iterator1 : iterator2).collectAsList().size());
+    assertTrue(iterator1.isClosed());
+    assertTrue(iterator2.isClosed());
   }
 }

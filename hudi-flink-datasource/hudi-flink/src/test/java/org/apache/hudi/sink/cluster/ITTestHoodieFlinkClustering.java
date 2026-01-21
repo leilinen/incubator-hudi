@@ -18,11 +18,13 @@
 
 package org.apache.hudi.sink.cluster;
 
+import org.apache.hudi.adapter.SinkFunctionAdapter;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -37,25 +39,22 @@ import org.apache.hudi.sink.clustering.ClusteringPlanSourceFunction;
 import org.apache.hudi.sink.clustering.FlinkClusteringConfig;
 import org.apache.hudi.sink.clustering.HoodieFlinkClusteringJob;
 import org.apache.hudi.table.HoodieFlinkTable;
-import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.CompactionUtil;
 import org.apache.hudi.util.FlinkWriteClients;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.FlinkMiniCluster;
 import org.apache.hudi.utils.TestConfigurations;
 import org.apache.hudi.utils.TestData;
 import org.apache.hudi.utils.TestSQL;
 
-import org.apache.avro.Schema;
 import org.apache.flink.api.common.RuntimeExecutionMode;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ExecutionOptions;
+import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Table;
@@ -77,6 +76,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.File;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -114,7 +114,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
 
@@ -135,22 +135,22 @@ public class ITTestHoodieFlinkClustering {
     cfg.targetPartitions = 4;
     cfg.sortMemory = 256;
     Configuration conf = FlinkClusteringConfig.toFlinkConfig(cfg);
-    assertEquals(256, conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY));
+    assertEquals(256, conf.get(FlinkOptions.WRITE_SORT_MEMORY));
 
     // create metaClient
     HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(conf);
 
     // set the table name
-    conf.setString(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
+    conf.set(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
 
     // set record key field
-    conf.setString(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
     // set partition field
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
 
     long ckpTimeout = env.getCheckpointConfig().getCheckpointTimeout();
-    conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+    conf.set(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
 
     // set table schema
     CompactionUtil.setAvroSchema(conf, metaClient);
@@ -159,11 +159,10 @@ public class ITTestHoodieFlinkClustering {
     // To compute the clustering instant time and do clustering.
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
       HoodieFlinkTable<?> table = writeClient.getHoodieTable();
-      String clusteringInstantTime = writeClient.createNewInstantTime();
 
-      boolean scheduled = writeClient.scheduleClusteringAtInstant(clusteringInstantTime, Option.empty());
+      Option<String> clusteringInstantTime = writeClient.scheduleClustering(Option.empty());
 
-      assertTrue(scheduled, "The clustering plan should be scheduled");
+      assertTrue(clusteringInstantTime.isPresent(), "The clustering plan should be scheduled");
 
       // fetch the instant based on the configured execution sequence
       table.getMetaClient().reloadActiveTimeline();
@@ -178,14 +177,14 @@ public class ITTestHoodieFlinkClustering {
       HoodieClusteringPlan clusteringPlan = clusteringPlanOption.get().getRight();
 
       // Mark instant as clustering inflight
-      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime);
+      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime.get());
       table.getActiveTimeline().transitionClusterRequestedToInflight(instant, Option.empty());
 
-      final Schema tableAvroSchema = StreamerUtil.getTableAvroSchema(table.getMetaClient(), false);
-      final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableAvroSchema);
+      final HoodieSchema tableSchema = StreamerUtil.getTableSchema(table.getMetaClient(), false);
+      final DataType rowDataType = HoodieSchemaConverter.convertToDataType(tableSchema);
       final RowType rowType = (RowType) rowDataType.getLogicalType();
 
-      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime, clusteringPlan, conf))
+      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime.get(), clusteringPlan, conf))
           .name("clustering_source")
           .uid("uid_clustering_source")
           .rebalance()
@@ -195,7 +194,7 @@ public class ITTestHoodieFlinkClustering {
           .setParallelism(clusteringPlan.getInputGroups().size());
 
       ExecNodeUtil.setManagedMemoryWeight(dataStream.getTransformation(),
-          conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+          conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
 
       dataStream
           .addSink(new ClusteringCommitSink(conf))
@@ -214,7 +213,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
 
@@ -274,40 +273,36 @@ public class ITTestHoodieFlinkClustering {
     HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(conf);
 
     // set the table name
-    conf.setString(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
+    conf.set(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
 
     // set record key field
-    conf.setString(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
     // set partition field
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
 
     long ckpTimeout = env.getCheckpointConfig().getCheckpointTimeout();
-    conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
-    conf.setInteger(FlinkOptions.CLUSTERING_DELTA_COMMITS, 2);
-    conf.setBoolean(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
-    conf.setBoolean(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, true);
+    conf.set(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+    conf.set(FlinkOptions.CLUSTERING_DELTA_COMMITS, 2);
+    conf.set(FlinkOptions.CLUSTERING_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.CLUSTERING_SCHEDULE_ENABLED, true);
 
     // set table schema
     CompactionUtil.setAvroSchema(conf, metaClient);
 
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
       // To compute the clustering instant time.
-      String clusteringInstantTime = writeClient.createNewInstantTime();
+      Option<String> clusteringInstantTime = writeClient.scheduleClustering(Option.empty());
 
-      boolean scheduled = writeClient.scheduleClusteringAtInstant(clusteringInstantTime, Option.empty());
-
-      assertFalse(scheduled, "1 delta commit, the clustering plan should not be scheduled");
+      assertFalse(clusteringInstantTime.isPresent(), "1 delta commit, the clustering plan should not be scheduled");
 
       tableEnv.executeSql(TestSQL.INSERT_T1).await();
       // wait for the asynchronous commit to finish
       TimeUnit.SECONDS.sleep(3);
 
-      clusteringInstantTime = writeClient.createNewInstantTime();
+      clusteringInstantTime = writeClient.scheduleClustering(Option.empty());
 
-      scheduled = writeClient.scheduleClusteringAtInstant(clusteringInstantTime, Option.empty());
-
-      assertTrue(scheduled, "2 delta commits, the clustering plan should be scheduled");
+      assertTrue(clusteringInstantTime.isPresent(), "2 delta commits, the clustering plan should be scheduled");
     }
   }
 
@@ -317,7 +312,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 1);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 1);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.HIVE_STYLE_PARTITIONING.key(), "false");
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
@@ -344,21 +339,21 @@ public class ITTestHoodieFlinkClustering {
     HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(conf);
 
     // set the table name
-    conf.setString(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
+    conf.set(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
 
     // set record key field
-    conf.setString(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
     // set partition field
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
 
     long ckpTimeout = env.getCheckpointConfig().getCheckpointTimeout();
-    conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+    conf.set(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
 
     // set archive commits
-    conf.setInteger(FlinkOptions.ARCHIVE_MAX_COMMITS.key(), 2);
-    conf.setInteger(FlinkOptions.ARCHIVE_MIN_COMMITS.key(), 1);
-    conf.setInteger(FlinkOptions.CLEAN_RETAIN_COMMITS.key(), 0);
+    conf.set(FlinkOptions.ARCHIVE_MAX_COMMITS, 2);
+    conf.set(FlinkOptions.ARCHIVE_MIN_COMMITS, 1);
+    conf.set(FlinkOptions.CLEAN_RETAIN_COMMITS, 0);
 
     // set table schema
     CompactionUtil.setAvroSchema(conf, metaClient);
@@ -368,11 +363,9 @@ public class ITTestHoodieFlinkClustering {
 
     try (HoodieFlinkWriteClient<?> writeClient = FlinkWriteClients.createWriteClient(conf)) {
       HoodieFlinkTable<?> table = writeClient.getHoodieTable();
-      String firstClusteringInstant = writeClient.createNewInstantTime();
+      Option<String> firstClusteringInstant = writeClient.scheduleClustering(Option.empty());
 
-      boolean scheduled = writeClient.scheduleClusteringAtInstant(firstClusteringInstant, Option.empty());
-
-      assertTrue(scheduled, "The clustering plan should be scheduled");
+      assertTrue(firstClusteringInstant.isPresent(), "The clustering plan should be scheduled");
 
       // fetch the instant based on the configured execution sequence
       table.getMetaClient().reloadActiveTimeline();
@@ -387,15 +380,15 @@ public class ITTestHoodieFlinkClustering {
       HoodieClusteringPlan clusteringPlan = clusteringPlanOption.get().getRight();
 
       // Mark instant as clustering inflight
-      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(firstClusteringInstant);
+      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(firstClusteringInstant.get());
       table.getActiveTimeline().transitionClusterRequestedToInflight(instant, Option.empty());
 
-      final Schema tableAvroSchema = StreamerUtil.getTableAvroSchema(table.getMetaClient(), false);
-      final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableAvroSchema);
+      final HoodieSchema tableAvroSchema = StreamerUtil.getTableSchema(table.getMetaClient(), false);
+      final DataType rowDataType = HoodieSchemaConverter.convertToDataType(tableAvroSchema);
       final RowType rowType = (RowType) rowDataType.getLogicalType();
 
       DataStream<ClusteringCommitEvent> dataStream =
-          env.addSource(new ClusteringPlanSourceFunction(firstClusteringInstant, clusteringPlan, conf))
+          env.addSource(new ClusteringPlanSourceFunction(firstClusteringInstant.get(), clusteringPlan, conf))
               .name("clustering_source")
               .uid("uid_clustering_source")
               .rebalance()
@@ -407,7 +400,7 @@ public class ITTestHoodieFlinkClustering {
 
       ExecNodeUtil.setManagedMemoryWeight(
           dataStream.getTransformation(),
-          conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+          conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
 
       // keep pending clustering, not committing clustering
       dataStream
@@ -425,9 +418,7 @@ public class ITTestHoodieFlinkClustering {
       // archive the first commit, retain the second commit before the inflight cluster commit
       writeClient.archive();
 
-      scheduled = writeClient.scheduleClusteringAtInstant(writeClient.createNewInstantTime(), Option.empty());
-
-      assertTrue(scheduled, "The clustering plan should be scheduled");
+      assertTrue(writeClient.scheduleClustering(Option.empty()).isPresent(), "The clustering plan should be scheduled");
       table.getMetaClient().reloadActiveTimeline();
       timeline = table.getActiveTimeline().filterPendingClusteringTimeline()
           .filter(i -> i.getState() == HoodieInstant.State.REQUESTED);
@@ -437,7 +428,7 @@ public class ITTestHoodieFlinkClustering {
       // clustering plan has no previous file slice generated by previous pending clustering
       assertFalse(inputFileGroups
           .stream().anyMatch(fg -> fg.getSlices()
-              .stream().anyMatch(s -> s.getDataFilePath().contains(firstClusteringInstant))));
+              .stream().anyMatch(s -> s.getDataFilePath().contains(firstClusteringInstant.get()))));
     }
   }
 
@@ -451,7 +442,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
 
@@ -497,7 +488,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
 
@@ -552,7 +543,7 @@ public class ITTestHoodieFlinkClustering {
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
     TableEnvironment tableEnv = TableEnvironmentImpl.create(settings);
     tableEnv.getConfig().getConfiguration()
-        .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+        .set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
 
     // if create a table without primary key, the nullability of the record key field is nullable
     // otherwise, the nullability is not nullable.
@@ -622,16 +613,16 @@ public class ITTestHoodieFlinkClustering {
     HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(conf);
 
     // set the table name
-    conf.setString(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
+    conf.set(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
 
     // set record key field
-    conf.setString(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
     // set partition field
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
 
     long ckpTimeout = env.getCheckpointConfig().getCheckpointTimeout();
-    conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+    conf.set(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
 
     // set table schema
     CompactionUtil.setAvroSchema(conf, metaClient);
@@ -641,11 +632,9 @@ public class ITTestHoodieFlinkClustering {
 
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
       HoodieFlinkTable<?> table = writeClient.getHoodieTable();
-      String clusteringInstantTime = writeClient.createNewInstantTime();
+      Option<String> clusteringInstantTime = writeClient.scheduleClustering(Option.empty());
 
-      boolean scheduled = writeClient.scheduleClusteringAtInstant(clusteringInstantTime, Option.empty());
-
-      assertTrue(scheduled, "The clustering plan should be scheduled");
+      assertTrue(clusteringInstantTime.isPresent(), "The clustering plan should be scheduled");
 
       // fetch the instant based on the configured execution sequence
       table.getMetaClient().reloadActiveTimeline();
@@ -660,10 +649,10 @@ public class ITTestHoodieFlinkClustering {
       HoodieClusteringPlan clusteringPlan = clusteringPlanOption.get().getRight();
 
       // Mark instant as clustering inflight
-      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime);
+      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime.get());
       table.getActiveTimeline().transitionClusterRequestedToInflight(instant, Option.empty());
 
-      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime, clusteringPlan, conf))
+      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime.get(), clusteringPlan, conf))
           .name("clustering_source")
           .uid("uid_clustering_source")
           .rebalance()
@@ -673,7 +662,7 @@ public class ITTestHoodieFlinkClustering {
           .setParallelism(clusteringPlan.getInputGroups().size());
 
       ExecNodeUtil.setManagedMemoryWeight(dataStream.getTransformation(),
-          conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+          conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
 
       dataStream
           .addSink(new ClusteringCommitSink(conf))
@@ -691,7 +680,7 @@ public class ITTestHoodieFlinkClustering {
     conf.set(ExecutionOptions.RUNTIME_MODE, RuntimeExecutionMode.BATCH);
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(conf);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
-    tEnv.getConfig().getConfiguration().setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
+    tEnv.getConfig().getConfiguration().set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
     tEnv.getConfig().getConfiguration().set(TableConfigOptions.TABLE_DML_SYNC, true);
     Map<String, String> options = new HashMap<>();
     options.put(FlinkOptions.PATH.key(), tempFile.getAbsolutePath());
@@ -712,23 +701,26 @@ public class ITTestHoodieFlinkClustering {
    */
   private void runOfflineCluster(TableEnvironment tableEnv, Configuration conf) throws Exception {
     // Make configuration and setAvroSchema.
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    env.setRestartStrategy(RestartStrategies.fixedDelayRestart(1, Time.milliseconds(1)));
+    Configuration envConf = new Configuration();
+    envConf.set(RestartStrategyOptions.RESTART_STRATEGY, "fixed-delay");
+    envConf.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_ATTEMPTS, 1);
+    envConf.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_DELAY, Duration.ofMillis(1));
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(envConf);
 
     // create metaClient
     HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(conf);
 
     // set the table name
-    conf.setString(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
+    conf.set(FlinkOptions.TABLE_NAME, metaClient.getTableConfig().getTableName());
 
     // set record key field
-    conf.setString(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
+    conf.set(FlinkOptions.RECORD_KEY_FIELD, metaClient.getTableConfig().getRecordKeyFieldProp());
     // set partition field
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, metaClient.getTableConfig().getPartitionFieldProp());
 
     long ckpTimeout = env.getCheckpointConfig().getCheckpointTimeout();
-    conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+    conf.set(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "partition");
 
     // set table schema
     CompactionUtil.setAvroSchema(conf, metaClient);
@@ -738,11 +730,9 @@ public class ITTestHoodieFlinkClustering {
 
     try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
       HoodieFlinkTable<?> table = writeClient.getHoodieTable();
-      String clusteringInstantTime = writeClient.createNewInstantTime();
+      Option<String> clusteringInstantTime = writeClient.scheduleClustering(Option.empty());
 
-      boolean scheduled = writeClient.scheduleClusteringAtInstant(clusteringInstantTime, Option.empty());
-
-      assertTrue(scheduled, "The clustering plan should be scheduled");
+      assertTrue(clusteringInstantTime.isPresent(), "The clustering plan should be scheduled");
 
       tableEnv.executeSql(TestSQL.INSERT_T1);
 
@@ -759,14 +749,14 @@ public class ITTestHoodieFlinkClustering {
       HoodieClusteringPlan clusteringPlan = clusteringPlanOption.get().getRight();
 
       // Mark instant as clustering inflight
-      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime);
+      HoodieInstant instant = INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringInstantTime.get());
       table.getActiveTimeline().transitionClusterRequestedToInflight(instant, Option.empty());
 
-      final Schema tableAvroSchema = StreamerUtil.getTableAvroSchema(table.getMetaClient(), false);
-      final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableAvroSchema);
+      final HoodieSchema tableAvroSchema = StreamerUtil.getTableSchema(table.getMetaClient(), false);
+      final DataType rowDataType = HoodieSchemaConverter.convertToDataType(tableAvroSchema);
       final RowType rowType = (RowType) rowDataType.getLogicalType();
 
-      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime, clusteringPlan, conf))
+      DataStream<ClusteringCommitEvent> dataStream = env.addSource(new ClusteringPlanSourceFunction(clusteringInstantTime.get(), clusteringPlan, conf))
           .name("clustering_source")
           .uid("uid_clustering_source")
           .rebalance()
@@ -776,7 +766,7 @@ public class ITTestHoodieFlinkClustering {
           .setParallelism(clusteringPlan.getInputGroups().size());
 
       ExecNodeUtil.setManagedMemoryWeight(dataStream.getTransformation(),
-          conf.getInteger(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
+          conf.get(FlinkOptions.WRITE_SORT_MEMORY) * 1024L * 1024L);
 
       dataStream
           .addSink(new ClusteringCommitTestSink(conf))
@@ -785,6 +775,18 @@ public class ITTestHoodieFlinkClustering {
           .setParallelism(1);
 
       env.execute("flink_hudi_clustering");
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  //  Utilities
+  // -------------------------------------------------------------------------
+  private static final class DiscardingSink<T> implements SinkFunctionAdapter<T> {
+    private static final long serialVersionUID = 1L;
+
+    @Override
+    public void invoke(T value) {
+      // do nothing
     }
   }
 }

@@ -27,6 +27,7 @@ import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -41,6 +42,7 @@ import org.apache.hudi.table.BulkInsertPartitioner;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
+import lombok.Getter;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -56,24 +58,29 @@ public abstract class BaseDatasetBulkInsertCommitActionExecutor implements Seria
 
   protected final transient HoodieWriteConfig writeConfig;
   protected final transient SparkRDDWriteClient writeClient;
-  protected final String instantTime;
+  @Getter
+  protected String instantTime;
   protected HoodieTable table;
 
   public BaseDatasetBulkInsertCommitActionExecutor(HoodieWriteConfig config,
-                                                   SparkRDDWriteClient writeClient,
-                                                   String instantTime) {
+                                                   SparkRDDWriteClient writeClient, String instantTime) {
     this.writeConfig = config;
     this.writeClient = writeClient;
     this.instantTime = instantTime;
   }
 
   protected void preExecute() {
+    table = writeClient.initTable(getWriteOperationType(), Option.ofNullable(instantTime));
     table.validateInsertSchema();
-    writeClient.startCommitWithTime(instantTime, getCommitActionType());
     writeClient.preWrite(instantTime, getWriteOperationType(), table.getMetaClient());
   }
 
-  protected abstract Option<HoodieData<WriteStatus>> doExecute(Dataset<Row> records, boolean arePartitionRecordsSorted);
+  protected Option<HoodieData<WriteStatus>> doExecute(Dataset<Row> records, boolean arePartitionRecordsSorted) {
+    table.getActiveTimeline().transitionRequestedToInflight(table.getMetaClient().createNewInstant(HoodieInstant.State.REQUESTED,
+        getCommitActionType(), instantTime), Option.empty());
+    return Option.of(HoodieDatasetBulkInsertHelper
+        .bulkInsert(records, instantTime, table, writeConfig, arePartitionRecordsSorted, false));
+  }
 
   protected void afterExecute(HoodieWriteMetadata<JavaRDD<WriteStatus>> result) {
     writeClient.postWrite(result, instantTime, table);
@@ -97,13 +104,11 @@ public abstract class BaseDatasetBulkInsertCommitActionExecutor implements Seria
     }
 
     boolean populateMetaFields = writeConfig.getBoolean(HoodieTableConfig.POPULATE_META_FIELDS);
-
-    table = writeClient.initTable(getWriteOperationType(), Option.ofNullable(instantTime));
+    preExecute();
 
     BulkInsertPartitioner<Dataset<Row>> bulkInsertPartitionerRows = getPartitioner(populateMetaFields, isTablePartitioned);
-    Dataset<Row> hoodieDF = HoodieDatasetBulkInsertHelper.prepareForBulkInsert(records, writeConfig, bulkInsertPartitionerRows, instantTime);
+    Dataset<Row> hoodieDF = HoodieDatasetBulkInsertHelper.prepareForBulkInsert(records, writeConfig, table.getMetaClient().getTableConfig(), bulkInsertPartitionerRows, instantTime);
 
-    preExecute();
     HoodieWriteMetadata<JavaRDD<WriteStatus>> result = buildHoodieWriteMetadata(doExecute(hoodieDF, bulkInsertPartitionerRows.arePartitionRecordsSorted()));
     afterExecute(result);
 
@@ -135,7 +140,5 @@ public abstract class BaseDatasetBulkInsertCommitActionExecutor implements Seria
     }
   }
 
-  protected Map<String, List<String>> getPartitionToReplacedFileIds(HoodieData<WriteStatus> writeStatuses) {
-    return Collections.emptyMap();
-  }
+  protected abstract Map<String, List<String>> getPartitionToReplacedFileIds(HoodieData<WriteStatus> writeStatuses);
 }

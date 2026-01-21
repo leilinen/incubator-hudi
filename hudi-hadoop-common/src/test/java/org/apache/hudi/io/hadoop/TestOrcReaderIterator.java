@@ -19,9 +19,10 @@
 
 package org.apache.hudi.io.hadoop;
 
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.util.AvroOrcUtils;
+import org.apache.hudi.common.util.collection.ClosableIterator;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -39,7 +40,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
-import java.util.Iterator;
 
 import static org.apache.hudi.common.testutils.SchemaTestUtil.getSchemaFromResource;
 import static org.apache.hudi.common.util.StringUtils.getUTF8Bytes;
@@ -63,36 +63,37 @@ public class TestOrcReaderIterator {
   @Test
   public void testOrcIteratorReadData() throws Exception {
     final Configuration conf = new Configuration();
-    Schema avroSchema = getSchemaFromResource(TestOrcReaderIterator.class, "/simple-test.avsc");
-    TypeDescription orcSchema = AvroOrcUtils.createOrcSchema(avroSchema);
+    HoodieSchema schema = getSchemaFromResource(TestOrcReaderIterator.class, "/simple-test.avsc");
+    TypeDescription orcSchema = AvroOrcUtils.createOrcSchema(schema);
     OrcFile.WriterOptions options = OrcFile.writerOptions(conf).setSchema(orcSchema).compress(CompressionKind.ZLIB);
-    Writer writer = OrcFile.createWriter(filePath, options);
-    VectorizedRowBatch batch = orcSchema.createRowBatch();
-    BytesColumnVector nameColumns = (BytesColumnVector) batch.cols[0];
-    LongColumnVector numberColumns = (LongColumnVector) batch.cols[1];
-    BytesColumnVector colorColumns = (BytesColumnVector) batch.cols[2];
-    for (int r = 0; r < 5; ++r) {
-      int row = batch.size++;
-      byte[] name = getUTF8Bytes("name" + r);
-      nameColumns.setVal(row, name);
-      byte[] color = getUTF8Bytes("color" + r);
-      colorColumns.setVal(row, color);
-      numberColumns.vector[row] = r;
+    try (Writer writer = OrcFile.createWriter(filePath, options)) {
+      VectorizedRowBatch batch = orcSchema.createRowBatch();
+      BytesColumnVector nameColumns = (BytesColumnVector) batch.cols[0];
+      LongColumnVector numberColumns = (LongColumnVector) batch.cols[1];
+      BytesColumnVector colorColumns = (BytesColumnVector) batch.cols[2];
+      for (int r = 0; r < 5; ++r) {
+        int row = batch.size++;
+        byte[] name = getUTF8Bytes("name" + r);
+        nameColumns.setVal(row, name);
+        byte[] color = getUTF8Bytes("color" + r);
+        colorColumns.setVal(row, color);
+        numberColumns.vector[row] = r;
+      }
+      writer.addRowBatch(batch);
     }
-    writer.addRowBatch(batch);
-    writer.close();
 
     Reader reader = OrcFile.createReader(filePath, OrcFile.readerOptions(conf));
     RecordReader recordReader = reader.rows(new Reader.Options(conf).schema(orcSchema));
-    Iterator<GenericRecord> iterator = new OrcReaderIterator<>(recordReader, avroSchema, orcSchema);
-    int recordCount = 0;
-    while (iterator.hasNext()) {
-      GenericRecord record = iterator.next();
-      assertEquals("name" + recordCount, record.get("name").toString());
-      assertEquals("color" + recordCount, record.get("favorite_color").toString());
-      assertEquals(recordCount, record.get("favorite_number"));
-      recordCount++;
+    try (ClosableIterator<GenericRecord> iterator = new OrcReaderIterator<>(recordReader, schema, orcSchema)) {
+      int recordCount = 0;
+      while (iterator.hasNext()) {
+        GenericRecord record = iterator.next();
+        assertEquals("name" + recordCount, record.get("name").toString());
+        assertEquals("color" + recordCount, record.get("favorite_color").toString());
+        assertEquals(recordCount, record.get("favorite_number"));
+        recordCount++;
+      }
+      assertEquals(5, recordCount);
     }
-    assertEquals(5, recordCount);
   }
 }

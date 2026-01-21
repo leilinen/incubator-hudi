@@ -18,7 +18,7 @@
 
 package org.apache.hudi.source.prune;
 
-import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.source.ExpressionEvaluators;
 import org.apache.hudi.source.ExpressionEvaluators.Evaluator;
@@ -26,11 +26,14 @@ import org.apache.hudi.source.stats.ColumnStats;
 import org.apache.hudi.source.stats.PartitionStatsIndex;
 import org.apache.hudi.table.format.FilePathUtils;
 import org.apache.hudi.util.DataTypeUtils;
-import org.apache.hudi.util.StreamerUtil;
 
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
+
+import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -49,12 +52,16 @@ import java.util.stream.Stream;
  */
 public class PartitionPruners {
 
-  public interface PartitionPruner extends Serializable {
+  public interface PartitionPruner extends Serializable, AutoCloseable {
 
     /**
      * Applies partition pruning on the given partition list, return remained partitions.
      */
     Set<String> filter(Collection<String> partitions);
+
+    default void close() {
+      // do nothing.
+    }
   }
 
   /**
@@ -147,10 +154,11 @@ public class PartitionPruners {
     public ColumnStatsPartitionPruner(
         RowType rowType,
         String basePath,
-        HoodieMetadataConfig metadataConfig,
-        ColumnStatsProbe probe) {
+        Configuration conf,
+        ColumnStatsProbe probe,
+        @Nullable HoodieTableMetaClient metaClient) {
       this.probe = probe;
-      this.partitionStatsIndex = new PartitionStatsIndex(basePath, rowType, metadataConfig);
+      this.partitionStatsIndex = new PartitionStatsIndex(basePath, rowType, conf, metaClient);
     }
 
     @Override
@@ -160,6 +168,11 @@ public class PartitionPruners {
         return new HashSet<>(partitions);
       }
       return partitions.stream().filter(candidatePartitions::contains).collect(Collectors.toSet());
+    }
+
+    @Override
+    public void close() {
+      this.partitionStatsIndex.close();
     }
   }
 
@@ -181,15 +194,22 @@ public class PartitionPruners {
       }
       return new HashSet<>(partitions);
     }
+
+    @Override
+    public void close() {
+      pruners.forEach(PartitionPruner::close);
+    }
   }
 
   public static Builder builder() {
     return new Builder();
   }
 
+  @NoArgsConstructor(access = AccessLevel.PRIVATE)
   public static class Builder {
     private RowType rowType;
     private String basePath;
+    private HoodieTableMetaClient metaClient;
     private Configuration conf;
     private ColumnStatsProbe probe;
     private List<ExpressionEvaluators.Evaluator> partitionEvaluators;
@@ -199,9 +219,6 @@ public class PartitionPruners {
     private boolean hivePartition;
     private Collection<String> candidatePartitions;
 
-    private Builder() {
-    }
-
     public Builder rowType(RowType rowType) {
       this.rowType = rowType;
       return this;
@@ -209,6 +226,11 @@ public class PartitionPruners {
 
     public Builder basePath(String basePath) {
       this.basePath = basePath;
+      return this;
+    }
+
+    public Builder metaClient(HoodieTableMetaClient metaClient) {
+      this.metaClient = metaClient;
       return this;
     }
 
@@ -267,8 +289,8 @@ public class PartitionPruners {
       if (probe != null
           && conf.get(FlinkOptions.READ_DATA_SKIPPING_ENABLED)
           && conf.get(FlinkOptions.METADATA_ENABLED)) {
-        columnStatsPruner = new ColumnStatsPartitionPruner(Objects.requireNonNull(rowType), Objects.requireNonNull(basePath),
-            StreamerUtil.metadataConfig(Objects.requireNonNull(conf)), probe);
+        columnStatsPruner = new ColumnStatsPartitionPruner(Objects.requireNonNull(rowType), Objects.requireNonNull(basePath), Objects.requireNonNull(conf),
+            probe, metaClient);
       }
       List<PartitionPruner> partitionPruners =
           Stream.of(staticPruner, dynamicPruner, columnStatsPruner)

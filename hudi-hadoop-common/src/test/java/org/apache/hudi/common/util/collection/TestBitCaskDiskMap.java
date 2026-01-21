@@ -24,6 +24,8 @@ import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.serialization.DefaultSerializer;
 import org.apache.hudi.common.testutils.AvroBinaryTestPayload;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
@@ -34,7 +36,6 @@ import org.apache.hudi.common.util.HoodieRecordSizeEstimator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.SpillableMapUtils;
 
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.junit.jupiter.api.BeforeEach;
@@ -91,7 +92,7 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
         assert recordKeys.contains(rec.getRecordKey());
         IndexedRecord originalRecord = originalRecords.get(rec.getRecordKey());
         HoodieAvroPayload payload = (HoodieAvroPayload) rec.getData();
-        Option<IndexedRecord> value = payload.getInsertValue(HoodieAvroUtils.addMetadataFields(getSimpleSchema()));
+        Option<IndexedRecord> value = payload.getInsertValue(HoodieSchemaUtils.addMetadataFields(getSimpleSchema()).toAvroSchema());
         assertEquals(originalRecord, value.get());
       }
 
@@ -141,7 +142,7 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   public void testSimpleUpsert(boolean isCompressionEnabled) throws IOException, URISyntaxException {
-    Schema schema = HoodieAvroUtils.addMetadataFields(getSimpleSchema());
+    HoodieSchema schema = HoodieSchemaUtils.addMetadataFields(getSimpleSchema());
 
     try (BitCaskDiskMap records = new BitCaskDiskMap<>(basePath, new DefaultSerializer<>(), isCompressionEnabled)) {
       SchemaTestUtil testUtil = new SchemaTestUtil();
@@ -172,7 +173,7 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
         HoodieRecord<? extends HoodieRecordPayload> rec = itr.next();
         assert recordKeys.contains(rec.getRecordKey());
         try {
-          IndexedRecord indexedRecord = (IndexedRecord) rec.getData().getInsertValue(schema).get();
+          IndexedRecord indexedRecord = (IndexedRecord) rec.getData().getInsertValue(schema.toAvroSchema()).get();
           String latestCommitTime =
               ((GenericRecord) indexedRecord).get(HoodieRecord.COMMIT_TIME_METADATA_FIELD).toString();
           assertEquals(latestCommitTime, newCommitTime);
@@ -186,20 +187,20 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
 
   @Test
   public void testSizeEstimator() throws IOException, URISyntaxException {
-    Schema schema = SchemaTestUtil.getSimpleSchema();
+    HoodieSchema schema = SchemaTestUtil.getSimpleSchema();
 
     // Test sizeEstimator without hoodie metadata fields
     SchemaTestUtil testUtil = new SchemaTestUtil();
     List<HoodieRecord> hoodieRecords = testUtil.generateHoodieTestRecords(0, 1, schema);
 
     long payloadSize =
-        SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema));
+        SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema.toAvroSchema()));
     assertTrue(payloadSize > 0);
 
     // Test sizeEstimator with hoodie metadata fields
-    schema = HoodieAvroUtils.addMetadataFields(schema);
+    schema = HoodieSchemaUtils.addMetadataFields(schema);
     hoodieRecords = testUtil.generateHoodieTestRecords(0, 1, schema);
-    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema));
+    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema.toAvroSchema()));
     assertTrue(payloadSize > 0);
 
     // Following tests payloads without an Avro Schema in the Record
@@ -210,18 +211,18 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
     hoodieRecords =
         indexedRecords.stream().map(r -> new HoodieAvroRecord<>(new HoodieKey(UUID.randomUUID().toString(), "0000/00/00"),
             new AvroBinaryTestPayload(Option.of((GenericRecord) r)))).collect(Collectors.toList());
-    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema));
+    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema.toAvroSchema()));
     assertTrue(payloadSize > 0);
 
     // Test sizeEstimator with hoodie metadata fields and without schema object in the payload
-    final Schema simpleSchemaWithMetadata = HoodieAvroUtils.addMetadataFields(SchemaTestUtil.getSimpleSchema());
+    final HoodieSchema simpleSchemaWithMetadata = HoodieSchemaUtils.addMetadataFields(SchemaTestUtil.getSimpleSchema());
     indexedRecords = testUtil.generateHoodieTestRecords(0, 1);
     hoodieRecords = indexedRecords.stream()
         .map(r -> new HoodieAvroRecord<>(new HoodieKey(UUID.randomUUID().toString(), "0000/00/00"),
             new AvroBinaryTestPayload(
-                Option.of(HoodieAvroUtils.rewriteRecord((GenericRecord) r, simpleSchemaWithMetadata)))))
+                Option.of(HoodieAvroUtils.rewriteRecord((GenericRecord) r, simpleSchemaWithMetadata.toAvroSchema())))))
         .collect(Collectors.toList());
-    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema));
+    payloadSize = SpillableMapUtils.computePayloadSize(hoodieRecords.remove(0), new HoodieRecordSizeEstimator(schema.toAvroSchema()));
     assertTrue(payloadSize > 0);
   }
 
@@ -257,10 +258,10 @@ public class TestBitCaskDiskMap extends HoodieCommonTestHarness {
   @Test
   public void testSizeEstimatorPerformance() throws IOException, URISyntaxException {
     // Test sizeEstimatorPerformance with simpleSchema
-    Schema schema = SchemaTestUtil.getSimpleSchema();
+    HoodieSchema schema = SchemaTestUtil.getSimpleSchema();
     SchemaTestUtil testUtil = new SchemaTestUtil();
     List<HoodieRecord> hoodieRecords = testUtil.generateHoodieTestRecords(0, 1, schema);
-    HoodieRecordSizeEstimator sizeEstimator = new HoodieRecordSizeEstimator<>(schema);
+    HoodieRecordSizeEstimator sizeEstimator = new HoodieRecordSizeEstimator<>(schema.toAvroSchema());
     HoodieRecord record = hoodieRecords.remove(0);
     long startTime = System.currentTimeMillis();
     SpillableMapUtils.computePayloadSize(record, sizeEstimator);

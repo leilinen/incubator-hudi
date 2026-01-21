@@ -23,8 +23,8 @@ import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.versioning.v2.ActiveTimelineV2;
 import org.apache.hudi.common.table.timeline.versioning.v2.CommitMetadataSerDeV2;
-import org.apache.hudi.common.table.timeline.versioning.v2.InstantGeneratorV2;
 import org.apache.hudi.common.table.timeline.versioning.v2.InstantFileNameGeneratorV2;
+import org.apache.hudi.common.table.timeline.versioning.v2.InstantGeneratorV2;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.exception.HoodieException;
@@ -60,9 +60,9 @@ public class HoodieMetaserverBasedTimeline extends ActiveTimelineV2 {
   }
 
   @Override
-  protected <T> void transitionStateToComplete(boolean shouldLock, HoodieInstant fromInstant, HoodieInstant toInstant, Option<T> metadata) {
+  protected <T> HoodieInstant transitionStateToComplete(boolean shouldLock, HoodieInstant fromInstant, HoodieInstant toInstant, Option<T> metadata) {
     ValidationUtils.checkArgument(fromInstant.requestedTime().equals(toInstant.requestedTime()));
-    metaserverClient.transitionInstantState(databaseName, tableName, fromInstant, toInstant,
+    return metaserverClient.transitionInstantState(databaseName, tableName, fromInstant, toInstant,
         metadata.map(m -> convertMetadataToByteArray(m, metadataSerDeV2)));
   }
 

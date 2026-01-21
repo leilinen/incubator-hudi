@@ -29,8 +29,8 @@ import org.apache.hudi.common.util.DateTimeUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.Serializable;
 import java.time.DateTimeException;
@@ -48,19 +48,19 @@ import static org.apache.hudi.common.util.StringUtils.isNullOrEmpty;
 /**
  * Status of a write operation.
  */
+@Data
 @PublicAPIClass(maturity = ApiMaturityLevel.STABLE)
+@Slf4j
 public class WriteStatus implements Serializable {
-
-  private static final Logger LOG = LoggerFactory.getLogger(WriteStatus.class);
   private static final long serialVersionUID = 1L;
   private static final long RANDOM_SEED = 9038412832L;
 
   private final HashMap<HoodieKey, Throwable> errors = new HashMap<>();
 
-  private final List<HoodieRecordDelegate> writtenRecordDelegates = new ArrayList<>();
-
   private final List<Pair<HoodieRecordDelegate, Throwable>> failedRecords = new ArrayList<>();
 
+  // true if this WriteStatus refers to a write happening in metadata table.
+  private final boolean isMetadataTable;
   private Throwable globalError = null;
 
   private String fileId = null;
@@ -73,19 +73,26 @@ public class WriteStatus implements Serializable {
   private long totalErrorRecords = 0;
 
   private final double failureFraction;
-  private final boolean trackSuccessRecords;
+  private boolean trackSuccessRecords;
   private final transient Random random;
+  private IndexStats indexStats = new IndexStats();
 
-  public WriteStatus(Boolean trackSuccessRecords, Double failureFraction) {
+  public WriteStatus(Boolean trackSuccessRecords, Double failureFraction, Boolean isMetadataTable) {
     this.trackSuccessRecords = trackSuccessRecords;
     this.failureFraction = failureFraction;
     this.random = new Random(RANDOM_SEED);
+    this.isMetadataTable = isMetadataTable;
+  }
+
+  public WriteStatus(Boolean trackSuccessRecords, Double failureFraction) {
+    this(trackSuccessRecords, failureFraction, false);
   }
 
   public WriteStatus() {
     this.failureFraction = 0.0d;
     this.trackSuccessRecords = false;
-    this.random = null;
+    this.random = new Random(RANDOM_SEED);
+    this.isMetadataTable = false;
   }
 
   /**
@@ -97,9 +104,20 @@ public class WriteStatus implements Serializable {
    */
   public void markSuccess(HoodieRecord record, Option<Map<String, String>> optionalRecordMetadata) {
     if (trackSuccessRecords) {
-      writtenRecordDelegates.add(HoodieRecordDelegate.fromHoodieRecord(record));
+      indexStats.addHoodieRecordDelegate(HoodieRecordDelegate.fromHoodieRecord(record));
     }
     updateStatsForSuccess(optionalRecordMetadata);
+  }
+
+  /**
+   * Allows the writer to manually add record delegates to the index stats.
+   */
+  public void manuallyTrackSuccess() {
+    this.trackSuccessRecords = false;
+  }
+
+  public void addRecordDelegate(HoodieRecordDelegate recordDelegate) {
+    indexStats.addHoodieRecordDelegate(recordDelegate);
   }
 
   /**
@@ -110,7 +128,7 @@ public class WriteStatus implements Serializable {
   @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public void markSuccess(HoodieRecordDelegate recordDelegate, Option<Map<String, String>> optionalRecordMetadata) {
     if (trackSuccessRecords) {
-      writtenRecordDelegates.add(Objects.requireNonNull(recordDelegate));
+      indexStats.addHoodieRecordDelegate(Objects.requireNonNull(recordDelegate));
     }
     updateStatsForSuccess(optionalRecordMetadata);
   }
@@ -140,7 +158,7 @@ public class WriteStatus implements Serializable {
       stat.setMinEventTime(eventTime);
       stat.setMaxEventTime(eventTime);
     } catch (DateTimeException | IllegalArgumentException e) {
-      LOG.debug("Fail to parse event time value: {}", eventTimeVal, e);
+      log.debug("Fail to parse event time value: {}", eventTimeVal, e);
     }
   }
 
@@ -181,12 +199,9 @@ public class WriteStatus implements Serializable {
     totalErrorRecords++;
   }
 
-  public String getFileId() {
-    return fileId;
-  }
-
-  public void setFileId(String fileId) {
-    this.fileId = fileId;
+  public WriteStatus removeMetadataStats() {
+    this.indexStats = null;
+    return this;
   }
 
   public boolean hasErrors() {
@@ -197,74 +212,15 @@ public class WriteStatus implements Serializable {
     return errors.containsKey(key);
   }
 
-  public HashMap<HoodieKey, Throwable> getErrors() {
-    return errors;
-  }
-
   public boolean hasGlobalError() {
     return globalError != null;
   }
 
-  public Throwable getGlobalError() {
-    return this.globalError;
-  }
-
-  public void setGlobalError(Throwable t) {
-    this.globalError = t;
-  }
-
   public List<HoodieRecordDelegate> getWrittenRecordDelegates() {
-    return writtenRecordDelegates;
-  }
-
-  public List<Pair<HoodieRecordDelegate, Throwable>> getFailedRecords() {
-    return failedRecords;
-  }
-
-  public HoodieWriteStat getStat() {
-    return stat;
-  }
-
-  public void setStat(HoodieWriteStat stat) {
-    this.stat = stat;
-  }
-
-  public String getPartitionPath() {
-    return partitionPath;
-  }
-
-  public void setPartitionPath(String partitionPath) {
-    this.partitionPath = partitionPath;
-  }
-
-  public long getTotalRecords() {
-    return totalRecords;
-  }
-
-  public void setTotalRecords(long totalRecords) {
-    this.totalRecords = totalRecords;
-  }
-
-  public long getTotalErrorRecords() {
-    return totalErrorRecords;
-  }
-
-  public void setTotalErrorRecords(long totalErrorRecords) {
-    this.totalErrorRecords = totalErrorRecords;
+    return indexStats.getWrittenRecordDelegates();
   }
 
   public boolean isTrackingSuccessfulWrites() {
     return trackSuccessRecords;
-  }
-
-  @Override
-  public String toString() {
-    return "WriteStatus {" + "fileId=" + fileId
-        + ", writeStat=" + stat
-        + ", globalError='" + globalError + '\''
-        + ", hasErrors='" + hasErrors() + '\''
-        + ", errorCount='" + totalErrorRecords + '\''
-        + ", errorPct='" + (100.0 * totalErrorRecords) / totalRecords + '\''
-        + '}';
   }
 }

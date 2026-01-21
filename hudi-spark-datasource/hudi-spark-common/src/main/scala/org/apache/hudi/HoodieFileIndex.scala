@@ -18,10 +18,10 @@
 package org.apache.hudi
 
 import org.apache.hudi.BaseHoodieTableFileIndex.PartitionPath
-import org.apache.hudi.DataSourceWriteOptions.{PARTITIONPATH_FIELD, PRECOMBINE_FIELD, RECORDKEY_FIELD}
+import org.apache.hudi.DataSourceWriteOptions.{PARTITIONPATH_FIELD, RECORDKEY_FIELD}
 import org.apache.hudi.HoodieFileIndex.{collectReferencedColumns, convertFilterForTimestampKeyGenerator, getConfigProperties, DataSkippingFailureMode}
 import org.apache.hudi.HoodieSparkConfUtils.getConfigValue
-import org.apache.hudi.common.config.{HoodieMetadataConfig, HoodieStorageConfig, TypedProperties}
+import org.apache.hudi.common.config.{HoodieMetadataConfig, TypedProperties}
 import org.apache.hudi.common.config.TimestampKeyGeneratorConfig.{TIMESTAMP_INPUT_DATE_FORMAT, TIMESTAMP_OUTPUT_DATE_FORMAT}
 import org.apache.hudi.common.model.{FileSlice, HoodieBaseFile, HoodieLogFile}
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient}
@@ -122,7 +122,7 @@ case class HoodieFileIndex(spark: SparkSession,
     new SecondaryIndexSupport(spark, metadataConfig, metaClient),
     new ExpressionIndexSupport(spark, schema, metadataConfig, metaClient),
     new BloomFiltersIndexSupport(spark, metadataConfig, metaClient),
-    new ColumnStatsIndexSupport(spark, schema, metadataConfig, metaClient)
+    new ColumnStatsIndexSupport(spark, schema, rawHoodieSchema, metadataConfig, metaClient)
   )
 
   private val enableHoodieExtension = spark.sessionState.conf.getConfString("spark.sql.extensions", "")
@@ -172,29 +172,34 @@ case class HoodieFileIndex(spark: SparkSession,
    * @return list of PartitionDirectory containing partition to base files mapping
    */
   override def listFiles(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Seq[PartitionDirectory] = {
-    val prunedPartitionsAndFilteredFileSlices = filterFileSlices(dataFilters, partitionFilters).map {
-      case (partitionOpt, fileSlices) =>
+    val slices = filterFileSlices(dataFilters, partitionFilters).flatMap(
+      { case (partitionOpt, fileSlices) =>
+        fileSlices.filter(!_.isEmpty).map(fs => ( InternalRow.fromSeq(partitionOpt.get.getValues), fs))
+      }
+    )
+    prepareFileSlices(slices)
+  }
+
+  protected def prepareFileSlices(slices: Seq[(InternalRow, FileSlice)]): Seq[PartitionDirectory] = {
+    hasPushedDownPartitionPredicates = true
+
+    val prunedPartitionsAndFilteredFileSlices = slices.map {
+      case (partitionValues, fileSlice) =>
         if (shouldEmbedFileSlices) {
-          PartitionDirectoryConverter.convertFileSlicesToPartitionDirectory(
-            partitionOpt,
-            fileSlices,
+          PartitionDirectoryConverter.convertFileSliceToPartitionDirectory(
+            partitionValues,
+            fileSlice,
             options)
         } else {
-          val allCandidateFiles: Seq[FileStatus] = fileSlices.flatMap(fs => {
-            val baseFileStatusOpt = getBaseFileInfo(Option.apply(fs.getBaseFile.orElse(null)))
-            val logPathInfoStream = fs.getLogFiles.map[StoragePathInfo](JFunction.toJavaFunction[HoodieLogFile, StoragePathInfo](lf => lf.getPathInfo))
-            val files = logPathInfoStream.collect(Collectors.toList[StoragePathInfo]).asScala
-            baseFileStatusOpt.foreach(f => files.append(f))
-            files
-          })
-            .map(fileInfo => new FileStatus(fileInfo.getLength, fileInfo.isDirectory, 0, fileInfo.getBlockSize,
-              fileInfo.getModificationTime, new Path(fileInfo.getPath.toUri)))
-          sparkAdapter.getSparkPartitionedFileUtils.newPartitionDirectory(
-            InternalRow.fromSeq(partitionOpt.get.values), allCandidateFiles)
+          val baseFileStatusOpt = getBaseFileInfo(Option.apply(fileSlice.getBaseFile.orElse(null)))
+          val logPathInfoStream = fileSlice.getLogFiles.map[StoragePathInfo](JFunction.toJavaFunction[HoodieLogFile, StoragePathInfo](lf => lf.getPathInfo))
+          val files = logPathInfoStream.collect(Collectors.toList[StoragePathInfo]).asScala
+          baseFileStatusOpt.foreach(f => files.append(f))
+          val allCandidateFiles = files.map(fileInfo => new FileStatus(fileInfo.getLength, fileInfo.isDirectory, 0, fileInfo.getBlockSize,
+            fileInfo.getModificationTime, new Path(fileInfo.getPath.toUri))).toSeq
+          sparkAdapter.getSparkPartitionedFileUtils.newPartitionDirectory(partitionValues, allCandidateFiles)
         }
     }
-
-    hasPushedDownPartitionPredicates = true
 
     if (shouldReadAsPartitionedTable()) {
       prunedPartitionsAndFilteredFileSlices
@@ -311,7 +316,7 @@ case class HoodieFileIndex(spark: SparkSession,
       } else if (isPartitionedTable && isDataSkippingEnabled) {
         // For partitioned table and no partition filters, if data skipping is enabled,
         // try using the PARTITION_STATS index to prune the partitions
-        val prunedPartitionPaths = new PartitionStatsIndexSupport(spark, schema, metadataConfig, metaClient)
+        val prunedPartitionPaths = new PartitionStatsIndexSupport(spark, schema, rawHoodieSchema, metadataConfig, metaClient)
           .prunePartitions(this, dataFilters)
         if (prunedPartitionPaths.nonEmpty) {
           try {
@@ -468,7 +473,7 @@ case class HoodieFileIndex(spark: SparkSession,
   private def isIndexAvailable: Boolean = indicesSupport.exists(idx => idx.isIndexAvailable)
 
   private def validateConfig(): Unit = {
-    if (isDataSkippingEnabled && (!isMetadataTableEnabled || !isIndexAvailable)) {
+    if (isDataSkippingEnabled && (!isMetadataTableEnabled || !isIndexAvailable) && !metaClient.isMetadataTable) {
       logWarning("Data skipping requires Metadata Table and at least one of the indices to be enabled! "
         + s"(isMetadataTableEnabled = $isMetadataTableEnabled, isColumnStatsIndexEnabled = $isColumnStatsIndexEnabled"
         + s", isRecordIndexApplicable = $isRecordIndexEnabled, isExpressionIndexEnabled = $isExpressionIndexEnabled, " +
@@ -524,7 +529,6 @@ object HoodieFileIndex extends Logging {
 
     if (tableConfig != null) {
       properties.setProperty(RECORDKEY_FIELD.key, tableConfig.getRecordKeyFields.orElse(Array.empty).mkString(","))
-      properties.setProperty(PRECOMBINE_FIELD.key, Option(tableConfig.getPreCombineField).getOrElse(""))
       properties.setProperty(PARTITIONPATH_FIELD.key, HoodieTableConfig.getPartitionFieldPropForKeyGenerator(tableConfig).orElse(""))
 
       // for simple bucket index, we need to set the INDEX_TYPE, BUCKET_INDEX_HASH_FIELD, BUCKET_INDEX_NUM_BUCKETS
@@ -577,7 +581,7 @@ object HoodieFileIndex extends Logging {
           }
         } catch {
           case NonFatal(e) =>
-            logWarning("Fail to convert filters for TimestampBaseAvroKeyGenerator", e)
+            logWarning("Failed to convert filters for TimestampBaseAvroKeyGenerator", e)
             partitionFilters
         }
       }
@@ -587,21 +591,10 @@ object HoodieFileIndex extends Logging {
   }
 
   private def getQueryPaths(options: Map[String, String]): Seq[StoragePath] = {
-    // NOTE: To make sure that globbing is appropriately handled w/in the
-    //       `path`, we need to:
-    //          - First, probe whether requested globbed paths has been resolved (and `glob.paths` was provided
-    //          in options); otherwise
-    //          - Treat `path` as fully-qualified (ie non-globbed) path
-    val paths = options.get("glob.paths") match {
-      case Some(globbed) =>
-        globbed.split(",").toSeq
-      case None =>
-        val path = options.getOrElse("path",
+    // Treat `path` as fully-qualified (ie non-globbed) path
+    val path = options.getOrElse("path",
           throw new IllegalArgumentException("'path' or 'glob paths' option required"))
-        Seq(path)
-    }
-
-    paths.map(new StoragePath(_))
+    Seq(new StoragePath(path))
   }
 
   // if database name is not set, fall back to use 'default' instead of failing

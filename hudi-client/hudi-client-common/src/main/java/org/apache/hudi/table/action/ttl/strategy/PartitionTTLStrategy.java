@@ -24,8 +24,7 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.table.HoodieTable;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.Serializable;
 import java.util.Arrays;
@@ -34,9 +33,8 @@ import java.util.List;
 /**
  * Strategy for partition-level ttl management.
  */
+@Slf4j
 public abstract class PartitionTTLStrategy implements TTLStrategy, Serializable {
-
-  private static final Logger LOG = LoggerFactory.getLogger(PartitionTTLStrategy.class);
 
   protected final HoodieTable hoodieTable;
   protected final HoodieWriteConfig writeConfig;
@@ -66,12 +64,11 @@ public abstract class PartitionTTLStrategy implements TTLStrategy, Serializable 
     List<String> partitionsForTTL;
     if (StringUtils.isNullOrEmpty(partitionSelected)) {
       // Return all partition paths.
-      partitionsForTTL = FSUtils.getAllPartitionPaths(
-          hoodieTable.getContext(), hoodieTable.getStorage(), writeConfig.getMetadataConfig(), writeConfig.getBasePath());
+      partitionsForTTL = FSUtils.getAllPartitionPaths(hoodieTable.getContext(), hoodieTable.getMetaClient(), writeConfig.getMetadataConfig());
     } else {
       partitionsForTTL = Arrays.asList(partitionSelected.split(","));
     }
-    LOG.info("Get partitions for ttl cost {} ms", timer.endTimer());
+    log.info("Get partitions for ttl cost {} ms", timer.endTimer());
     return partitionsForTTL;
   }
 

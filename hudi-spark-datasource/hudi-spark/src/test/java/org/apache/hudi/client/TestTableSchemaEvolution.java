@@ -18,16 +18,17 @@
 
 package org.apache.hudi.client;
 
-import org.apache.hudi.avro.AvroSchemaUtils;
 import org.apache.hudi.avro.HoodieAvroUtils;
-import org.apache.hudi.common.model.HoodieAvroRecord;
+import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.model.TableServiceType;
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaCompatibility;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
-import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieIndexConfig;
@@ -35,10 +36,12 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieInsertException;
 import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.index.HoodieIndex.IndexType;
+import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.testutils.HoodieClientTestBase;
 import org.apache.hudi.testutils.HoodieClientTestUtils;
 
-import org.apache.avro.Schema;
+import lombok.AccessLevel;
+import lombok.Getter;
 import org.apache.avro.generic.GenericRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -65,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class TestTableSchemaEvolution extends HoodieClientTestBase {
 
   private final String initCommitTime = "000";
+  @Getter(AccessLevel.PROTECTED)
   private HoodieTableType tableType = HoodieTableType.COPY_ON_WRITE;
   private HoodieTestDataGenerator dataGenEvolved = new HoodieTestDataGenerator();
   private HoodieTestDataGenerator dataGenDevolved = new HoodieTestDataGenerator();
@@ -179,8 +183,10 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     checkLatestDeltaCommit("001");
 
     // Compact once so we can incrementally read later
-    assertTrue(client.scheduleCompactionAtInstant("002", Option.empty()));
-    client.compact("002");
+    assertTrue(WriteClientTestUtils.scheduleTableService(client, "002", Option.empty(), TableServiceType.COMPACT).isPresent());
+    HoodieWriteMetadata result = client.compact("002");
+    client.commitCompaction("002", result, Option.empty());
+    assertTrue(metaClient.reloadActiveTimeline().filterCompletedInstants().containsInstant("002"));
 
     // Updates with same schema is allowed
     final int numUpdateRecords = 5;
@@ -205,7 +211,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     // with a evolved schema and insertBatch inserts records using the TRIP_EXAMPLE_SCHEMA.
     try {
       writeBatch(client, "005", "004", Option.empty(), "003", numRecords,
-          (String s, Integer a) -> failedRecords, SparkRDDWriteClient::insert, false, numRecords, 2 * numRecords, 5, false, INSTANT_GENERATOR);
+          (String s, Integer a) -> failedRecords, SparkRDDWriteClient::insert, false, numRecords, 2 * numRecords, 5, INSTANT_GENERATOR);
       assertTrue(shouldAllowDroppedColumns);
     } catch (HoodieInsertException e) {
       assertFalse(shouldAllowDroppedColumns);
@@ -224,7 +230,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     // with an evolved schema and insertBatch inserts records using the TRIP_EXAMPLE_SCHEMA.
     final List<HoodieRecord> evolvedRecords = generateInsertsWithSchema("007", numRecords, TRIP_EXAMPLE_SCHEMA_EVOLVED_COL_ADDED);
     writeBatch(client, "007", "006", Option.empty(), initCommitTime, numRecords,
-        (String s, Integer a) -> evolvedRecords, SparkRDDWriteClient::insert, false, numRecords, 3 * numRecords, 7, false, INSTANT_GENERATOR);
+        (String s, Integer a) -> evolvedRecords, SparkRDDWriteClient::insert, false, numRecords, 3 * numRecords, 7, INSTANT_GENERATOR);
 
     // new commit
     checkLatestDeltaCommit("007");
@@ -233,7 +239,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     // Updates with evolved schema is allowed
     final List<HoodieRecord> updateRecords = generateUpdatesWithSchema("008", numUpdateRecords, TRIP_EXAMPLE_SCHEMA_EVOLVED_COL_ADDED);
     writeBatch(client, "008", "007", Option.empty(), initCommitTime,
-        numUpdateRecords, (String s, Integer a) -> updateRecords, SparkRDDWriteClient::upsert, false, numRecords, 4 * numRecords, 8, false, INSTANT_GENERATOR);
+        numUpdateRecords, (String s, Integer a) -> updateRecords, SparkRDDWriteClient::upsert, false, numRecords, 4 * numRecords, 8, INSTANT_GENERATOR);
     // new commit
     checkLatestDeltaCommit("008");
     checkReadRecords("000", 4 * numRecords);
@@ -289,7 +295,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     final List<HoodieRecord> failedRecords = generateInsertsWithSchema("004", numRecords, TRIP_EXAMPLE_SCHEMA_EVOLVED_COL_DROPPED);
     try {
       writeBatch(client, "004", "003", Option.empty(), "003", numRecords,
-          (String s, Integer a) -> failedRecords, SparkRDDWriteClient::insert, true, numRecords, numRecords * 2, 1, false, INSTANT_GENERATOR);
+          (String s, Integer a) -> failedRecords, SparkRDDWriteClient::insert, true, numRecords, numRecords * 2, 1, INSTANT_GENERATOR);
       assertTrue(shouldAllowDroppedColumns);
     } catch (HoodieInsertException e) {
       assertFalse(shouldAllowDroppedColumns);
@@ -308,7 +314,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     // We cannot use insertBatch directly here because we want to insert records
     // with a evolved schema.
     writeBatch(client, "006", "005", Option.empty(), initCommitTime, numRecords,
-        (String s, Integer a) -> evolvedRecords, SparkRDDWriteClient::insert, true, numRecords, 3 * numRecords, 6, false, INSTANT_GENERATOR);
+        (String s, Integer a) -> evolvedRecords, SparkRDDWriteClient::insert, true, numRecords, 3 * numRecords, 6, INSTANT_GENERATOR);
 
     // new commit
     HoodieTimeline curTimeline = metaClient.reloadActiveTimeline().getCommitAndReplaceTimeline().filterCompletedInstants();
@@ -318,7 +324,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
     // Updating with evolved schema is allowed
     final List<HoodieRecord> updateRecords = generateUpdatesWithSchema("007", numUpdateRecords, TRIP_EXAMPLE_SCHEMA_EVOLVED_COL_ADDED);
     writeBatch(client, "007", "006", Option.empty(), initCommitTime,
-        numUpdateRecords, (String s, Integer a) -> updateRecords, SparkRDDWriteClient::upsert, true, numUpdateRecords, 3 * numRecords, 7, false, INSTANT_GENERATOR);
+        numUpdateRecords, (String s, Integer a) -> updateRecords, SparkRDDWriteClient::upsert, true, numUpdateRecords, 3 * numRecords, 7, INSTANT_GENERATOR);
     checkReadRecords("000", 3 * numRecords);
 
     // Now try updating w/ the original schema (should succeed)
@@ -377,17 +383,12 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   }
 
   private List<HoodieRecord> convertToSchema(List<HoodieRecord> records, String schemaStr) {
-    Schema newSchema = new Schema.Parser().parse(schemaStr);
+    HoodieSchema newSchema = HoodieSchema.parse(schemaStr);
     return records.stream().map(r -> {
       HoodieKey key = r.getKey();
-      GenericRecord payload;
-      try {
-        payload = (GenericRecord) ((HoodieAvroRecord) r).getData().getInsertValue(HoodieTestDataGenerator.AVRO_SCHEMA).get();
-        GenericRecord newPayload = HoodieAvroUtils.rewriteRecord(payload, newSchema);
-        return new HoodieAvroRecord(key, new RawTripTestPayload(newPayload.toString(), key.getRecordKey(), key.getPartitionPath(), schemaStr));
-      } catch (IOException e) {
-        throw new RuntimeException("Conversion to new schema failed");
-      }
+      GenericRecord payload = (GenericRecord) ((HoodieAvroIndexedRecord) r).getData();
+      GenericRecord newPayload = HoodieAvroUtils.rewriteRecord(payload, newSchema.toAvroSchema());
+      return new HoodieAvroIndexedRecord(key, newPayload);
     }).collect(Collectors.toList());
   }
 
@@ -403,11 +404,6 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   }
 
   private static boolean isSchemaCompatible(String oldSchema, String newSchema, boolean shouldAllowDroppedColumns) {
-    return AvroSchemaUtils.isSchemaCompatible(new Schema.Parser().parse(oldSchema), new Schema.Parser().parse(newSchema), shouldAllowDroppedColumns);
-  }
-
-  @Override
-  protected HoodieTableType getTableType() {
-    return tableType;
+    return HoodieSchemaCompatibility.isSchemaCompatible(HoodieSchema.parse(oldSchema), HoodieSchema.parse(newSchema), shouldAllowDroppedColumns);
   }
 }

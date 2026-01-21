@@ -110,7 +110,7 @@ public class HoodieJavaMergeOnReadTable<T> extends HoodieJavaCopyOnWriteTable<T>
       HoodieEngineContext context, String compactionInstantTime) {
     RunCompactionActionExecutor compactionExecutor = new RunCompactionActionExecutor(
         context, config, this, compactionInstantTime, new HoodieJavaMergeOnReadTableCompactor(),
-        new HoodieJavaCopyOnWriteTable(config, context, getMetaClient()), WriteOperationType.COMPACT);
+        WriteOperationType.COMPACT);
     return convertMetadata(compactionExecutor.execute());
   }
 
@@ -124,8 +124,8 @@ public class HoodieJavaMergeOnReadTable<T> extends HoodieJavaCopyOnWriteTable<T>
   @Override
   public HoodieWriteMetadata<List<WriteStatus>> logCompact(HoodieEngineContext context, String logCompactionInstantTime) {
     RunCompactionActionExecutor logCompactionExecutor = new RunCompactionActionExecutor(context, config, this,
-        logCompactionInstantTime, new HoodieJavaMergeOnReadTableCompactor<>(), this, WriteOperationType.LOG_COMPACT);
-    return logCompactionExecutor.execute();
+        logCompactionInstantTime, new HoodieJavaMergeOnReadTableCompactor<>(), WriteOperationType.LOG_COMPACT);
+    return convertMetadata(logCompactionExecutor.execute());
   }
 
   @Override

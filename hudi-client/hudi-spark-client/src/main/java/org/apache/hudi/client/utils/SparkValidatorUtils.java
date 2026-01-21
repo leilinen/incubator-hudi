@@ -18,7 +18,7 @@
 
 package org.apache.hudi.client.utils;
 
-import org.apache.hudi.AvroConversionUtils;
+import org.apache.hudi.HoodieSchemaConversionUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.client.validator.SparkPreCommitValidator;
@@ -60,7 +60,7 @@ public class SparkValidatorUtils {
 
   /**
    * Check configured pre-commit validators and run them. Note that this only works for COW tables
-   * 
+   * <p>
    * Throw error if there are validation failures.
    */
   public static void runValidators(HoodieWriteConfig config,
@@ -75,7 +75,7 @@ public class SparkValidatorUtils {
         writeMetadata.setWriteStats(writeMetadata.getWriteStatuses().map(WriteStatus::getStat).collectAsList());
       }
       Set<String> partitionsModified = writeMetadata.getWriteStats().get().stream().map(HoodieWriteStat::getPartitionPath).collect(Collectors.toSet());
-      SQLContext sqlContext = new SQLContext(HoodieSparkEngineContext.getSparkContext(context));
+      SQLContext sqlContext = SQLContext.getOrCreate(HoodieSparkEngineContext.getSparkContext(context).sc());
       // Refresh timeline to ensure validator sees the any other operations done on timeline (async operations such as other clustering/compaction/rollback)
       table.getMetaClient().reloadActiveTimeline();
       Dataset<Row> afterState = getRecordsFromPendingCommits(sqlContext, partitionsModified, writeMetadata, table, instantTime);
@@ -101,7 +101,7 @@ public class SparkValidatorUtils {
   /**
    * Run validators in a separate thread pool for parallelism. Each of validator can submit a distributed spark job if needed.
    */
-  private static CompletableFuture<Boolean> runValidatorAsync(SparkPreCommitValidator validator, HoodieWriteMetadata<HoodieData<WriteStatus>> writeMetadata,
+  private static CompletableFuture<Boolean> runValidatorAsync(SparkPreCommitValidator validator, HoodieWriteMetadata<?> writeMetadata,
                                                               Dataset<Row> beforeState, Dataset<Row> afterState, String instantTime) {
     return CompletableFuture.supplyAsync(() -> {
       try {
@@ -137,12 +137,11 @@ public class SparkValidatorUtils {
       try {
         return sqlContext.createDataFrame(
             sqlContext.emptyDataFrame().rdd(),
-            AvroConversionUtils.convertAvroSchemaToStructType(
-                new TableSchemaResolver(table.getMetaClient()).getTableAvroSchema()));
+            HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(
+                new TableSchemaResolver(table.getMetaClient()).getTableSchema()));
       } catch (Exception e) {
         LOG.warn("Cannot get table schema from before state.", e);
-        LOG.warn("Use the schema from after state (current transaction) to create the empty Spark "
-            + "dataframe: " + newStructTypeSchema);
+        LOG.warn("Using the schema from after state (current transaction) to create the empty Spark dataframe: {}", newStructTypeSchema);
         return sqlContext.createDataFrame(
             sqlContext.emptyDataFrame().rdd(), newStructTypeSchema);
       }
@@ -154,7 +153,7 @@ public class SparkValidatorUtils {
    * Get records from specified list of data files.
    */
   public static Dataset<Row> readRecordsForBaseFiles(SQLContext sqlContext, List<String> baseFilePaths) {
-    return sqlContext.read().parquet(JavaScalaConverters.<String>convertJavaListToScalaSeq(baseFilePaths));
+    return sqlContext.read().parquet(JavaScalaConverters.convertJavaListToScalaSeq(baseFilePaths));
   }
 
   /**
@@ -163,7 +162,7 @@ public class SparkValidatorUtils {
    */
   public static Dataset<Row> getRecordsFromPendingCommits(SQLContext sqlContext, 
                                                           Set<String> partitionsAffected, 
-                                                          HoodieWriteMetadata<HoodieData<WriteStatus>> writeMetadata,
+                                                          HoodieWriteMetadata<?> writeMetadata,
                                                           HoodieTable table,
                                                           String instantTime) {
 

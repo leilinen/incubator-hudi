@@ -18,20 +18,19 @@
 
 package org.apache.hudi.sink;
 
+import org.apache.hudi.adapter.AbstractRichFunctionAdapter;
+import org.apache.hudi.adapter.SinkFunctionAdapter;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.sink.utils.NonThrownExecutor;
 import org.apache.hudi.util.FlinkWriteClients;
 
-import org.apache.flink.api.common.functions.AbstractRichFunction;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Sink function that cleans the old commits.
@@ -40,9 +39,9 @@ import org.slf4j.LoggerFactory;
  * at a time, a new task can not be scheduled until the last task finished(fails or normally succeed).
  * The cleaning task never expects to throw but only log.
  */
-public class CleanFunction<T> extends AbstractRichFunction
-    implements SinkFunction<T>, CheckpointedFunction, CheckpointListener {
-  private static final Logger LOG = LoggerFactory.getLogger(CleanFunction.class);
+@Slf4j
+public class CleanFunction<T> extends AbstractRichFunctionAdapter
+    implements SinkFunctionAdapter<T>, CheckpointedFunction, CheckpointListener {
 
   private final Configuration conf;
 
@@ -60,14 +59,12 @@ public class CleanFunction<T> extends AbstractRichFunction
   public void open(Configuration parameters) throws Exception {
     super.open(parameters);
     this.writeClient = FlinkWriteClients.createWriteClient(conf, getRuntimeContext());
-    this.executor = NonThrownExecutor.builder(LOG).waitForTasksFinish(true).build();
-    String instantTime = writeClient.createNewInstantTime();
-    LOG.info(String.format("exec clean with instant time %s...", instantTime));
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED)) {
+    this.executor = NonThrownExecutor.builder(log).waitForTasksFinish(true).build();
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED)) {
       executor.execute(() -> {
         this.isCleaning = true;
         try {
-          this.writeClient.clean(instantTime);
+          this.writeClient.clean();
         } finally {
           this.isCleaning = false;
         }
@@ -77,7 +74,7 @@ public class CleanFunction<T> extends AbstractRichFunction
 
   @Override
   public void notifyCheckpointComplete(long l) throws Exception {
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED) && isCleaning) {
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED) && isCleaning) {
       executor.execute(() -> {
         try {
           this.writeClient.waitForCleaningFinish();
@@ -91,13 +88,13 @@ public class CleanFunction<T> extends AbstractRichFunction
 
   @Override
   public void snapshotState(FunctionSnapshotContext context) throws Exception {
-    if (conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED) && !isCleaning) {
+    if (conf.get(FlinkOptions.CLEAN_ASYNC_ENABLED) && !isCleaning) {
       try {
         this.writeClient.startAsyncCleaning();
         this.isCleaning = true;
       } catch (Throwable throwable) {
         // catch the exception to not affect the normal checkpointing
-        LOG.warn("Error while start async cleaning", throwable);
+        log.warn("Failed to start async cleaning", throwable);
       }
     }
   }

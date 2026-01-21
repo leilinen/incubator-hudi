@@ -40,7 +40,6 @@ import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
-import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 import org.apache.hudi.util.JavaScalaConverters;
 import org.apache.hudi.utilities.config.SqlTransformerConfig;
 import org.apache.hudi.utilities.exception.HoodieSnapshotExporterException;
@@ -162,7 +161,9 @@ public class HoodieSnapshotExporter {
         latestCommitTimestamp));
 
     final HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
-    final List<String> partitions = getPartitions(engineContext, cfg, new HoodieHadoopStorage(sourceFs));
+    final List<String> partitions = getPartitions(engineContext, cfg, HoodieStorageUtils.getStorage(
+        HadoopFSUtils.convertToStoragePath(new Path(cfg.sourceBasePath)),
+        HadoopFSUtils.getStorageConf(sourceFs.getConf())));
     if (partitions.isEmpty()) {
       throw new HoodieSnapshotExporterException("The source dataset has 0 partition to snapshot.");
     }
@@ -184,7 +185,8 @@ public class HoodieSnapshotExporter {
 
   private List<String> getPartitions(HoodieEngineContext engineContext, Config cfg,
                                      HoodieStorage storage) {
-    return FSUtils.getAllPartitionPaths(engineContext, storage, cfg.sourceBasePath, true);
+    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setBasePath(cfg.sourceBasePath).setConf(storage.getConf()).build();
+    return FSUtils.getAllPartitionPaths(engineContext, metaClient, true);
   }
 
   private void createSuccessTag(FileSystem fs, Config cfg) throws IOException {
@@ -218,7 +220,7 @@ public class HoodieSnapshotExporter {
             .map(HoodieBaseFile::getPath).iterator())
         .toLocalIterator();
 
-    Dataset<Row> sourceDataset = new SQLContext(jsc).read().parquet(JavaScalaConverters.convertJavaIteratorToScalaIterator(exportingFilePaths).toSeq());
+    Dataset<Row> sourceDataset = SQLContext.getOrCreate(jsc.sc()).read().parquet(JavaScalaConverters.convertJavaIteratorToScalaIterator(exportingFilePaths).toSeq());
 
     if (!StringUtils.isNullOrEmpty(cfg.transformerClassName)) {
       Option<Transformer> transformer = UtilHelpers.createTransformer(

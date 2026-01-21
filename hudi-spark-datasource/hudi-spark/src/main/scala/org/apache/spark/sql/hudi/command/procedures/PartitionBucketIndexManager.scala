@@ -17,29 +17,29 @@
 
 package org.apache.spark.sql.hudi.command.procedures
 
-import org.apache.hudi.{AvroConversionUtils, HoodieCLIUtils, HoodieSparkSqlWriter}
+import org.apache.hudi.{HoodieCLIUtils, HoodieSchemaConversionUtils, HoodieSparkSqlWriter, SparkAdapterSupport}
 import org.apache.hudi.DataSourceWriteOptions.{BULK_INSERT_OPERATION_OPT_VAL, ENABLE_ROW_WRITER, OPERATION}
-import org.apache.hudi.avro.HoodieAvroUtils
 import org.apache.hudi.client.SparkRDDWriteClient
-import org.apache.hudi.common.config.{HoodieMetadataConfig, HoodieReaderConfig, SerializableSchema}
+import org.apache.hudi.common.config.{HoodieMetadataConfig, HoodieReaderConfig}
 import org.apache.hudi.common.engine.{HoodieEngineContext, ReaderContextFactory}
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.{PartitionBucketIndexHashingConfig, WriteOperationType}
+import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaUtils}
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.common.table.read.HoodieFileGroupReader
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView
 import org.apache.hudi.common.util.{Option, ValidationUtils}
 import org.apache.hudi.config.{HoodieIndexConfig, HoodieInternalConfig}
 import org.apache.hudi.config.HoodieWriteConfig.ROLLBACK_USING_MARKERS_ENABLE
+import org.apache.hudi.data.CloseableIteratorListener
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.index.bucket.partition.{PartitionBucketIndexCalculator, PartitionBucketIndexUtils}
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.storage.StoragePath
 
-import org.apache.avro.Schema
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{HoodieUnsafeUtils, Row, SaveMode}
+import org.apache.spark.sql.{Row, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.PredicateHelper
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig
@@ -55,7 +55,8 @@ class PartitionBucketIndexManager extends BaseProcedure
   with ProcedureBuilder
   with PredicateHelper
   with ProvidesHoodieConfig
-  with Logging {
+  with Logging
+  with SparkAdapterSupport {
 
   private val PARAMETERS = Array[ProcedureParameter](
     ProcedureParameter.required(0, "table", DataTypes.StringType),
@@ -112,7 +113,8 @@ class PartitionBucketIndexManager extends BaseProcedure
 
       config = config ++ Map(OPERATION.key -> BULK_INSERT_OPERATION_OPT_VAL,
         HoodieInternalConfig.BULKINSERT_OVERWRITE_OPERATION_TYPE.key -> WriteOperationType.BUCKET_RESCALE.value(),
-        ENABLE_ROW_WRITER.key() -> "true")
+        ENABLE_ROW_WRITER.key() -> "true",
+        HoodieReaderConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN.key -> writeClient.getConfig.enableOptimizedLogBlocksScan.toString)
 
       // Determine which operation to perform
       if (showConfig) {
@@ -145,7 +147,7 @@ class PartitionBucketIndexManager extends BaseProcedure
     val mdtEnable = metaClient.getStorage().exists(new StoragePath(metaClient.getBasePath, HoodieTableMetaClient.METADATA_TABLE_FOLDER_PATH))
 
     // get all partition paths
-    val allPartitions = FSUtils.getAllPartitionPaths(context, metaClient.getStorage, metaClient.getBasePath, mdtEnable)
+    val allPartitions = FSUtils.getAllPartitionPaths(context, metaClient, mdtEnable)
     val usePartitionBucketIndexBefore = PartitionBucketIndexUtils.isPartitionSimpleBucketIndex(context.getStorageConf, basePath.toString)
 
     var partition2BucketWithLatestHashingConfig: util.Map[String, Integer] = null
@@ -194,8 +196,8 @@ class PartitionBucketIndexManager extends BaseProcedure
       logInfo("Perform OVERWRITE with dry-run disabled.")
       val partitionsToRescale = rescalePartitionsMap.keys
       // get all fileSlices need to read
-      val allFilesMap = FSUtils.getFilesInPartitions(context, metaClient.getStorage(), HoodieMetadataConfig.newBuilder.enable(mdtEnable).build,
-        metaClient.getBasePath.toString, partitionsToRescale.map(relative => {
+      val allFilesMap = FSUtils.getFilesInPartitions(context, metaClient, HoodieMetadataConfig.newBuilder.enable(mdtEnable).build,
+        partitionsToRescale.map(relative => {
           new StoragePath(basePath, relative)
         }).map(storagePath => storagePath.toString).toArray)
       val files = allFilesMap.values().asScala.flatMap(x => x.asScala).toList
@@ -205,47 +207,46 @@ class PartitionBucketIndexManager extends BaseProcedure
       }).toList
 
       // read all fileSlice para and get DF
-      var tableSchemaWithMetaFields: Schema = null
-      try tableSchemaWithMetaFields = HoodieAvroUtils.addMetadataFields(new TableSchemaResolver(metaClient).getTableAvroSchema(false), false)
+      var tableSchemaWithMetaFields: HoodieSchema = null
+      try tableSchemaWithMetaFields = HoodieSchemaUtils.addMetadataFields(new TableSchemaResolver(metaClient).getTableSchema(false), false)
       catch {
         case e: Exception =>
           throw new HoodieException("Failed to get table schema during clustering", e)
       }
 
       val readerContextFactory: ReaderContextFactory[InternalRow] = context.getReaderContextFactory(metaClient)
-      val sparkSchemaWithMetaFields = AvroConversionUtils.convertAvroSchemaToStructType(tableSchemaWithMetaFields)
+      val sparkSchemaWithMetaFields = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(tableSchemaWithMetaFields)
 
       val res: RDD[InternalRow] = if (allFileSlice.isEmpty) {
         spark.sparkContext.emptyRDD
       } else {
-        val serializableTableSchemaWithMetaFields = new SerializableSchema(tableSchemaWithMetaFields)
         val latestInstantTime = metaClient.getActiveTimeline.getCommitsTimeline.filterCompletedInstants().lastInstant().get()
 
         spark.sparkContext.parallelize(allFileSlice, allFileSlice.size).flatMap(fileSlice => {
           // instantiate other supporting cast
-          val readerSchema = serializableTableSchemaWithMetaFields.get
           val internalSchemaOption: Option[InternalSchema] = Option.empty()
+          // get this value from config, which has obtained this from write client
+          val enableOptimizedLogBlockScan = config.getOrElse(HoodieReaderConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN.key(),
+            HoodieReaderConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN.defaultValue()).toBoolean
           // instantiate FG reader
-          val fileGroupReader = new HoodieFileGroupReader(readerContextFactory.getContext,
-            metaClient.getStorage,
-            basePath.toString,
-            latestInstantTime.requestedTime(),
-            fileSlice,
-            readerSchema,
-            readerSchema,
-            internalSchemaOption, // not support evolution of schema for now
-            metaClient,
-            metaClient.getTableConfig.getProps,
-            0,
-            java.lang.Long.MAX_VALUE,
-            HoodieReaderConfig.MERGE_USE_RECORD_POSITIONS.defaultValue(),
-            false)
-          fileGroupReader.initRecordIterators()
-          val iterator = fileGroupReader.getClosableIterator.asInstanceOf[HoodieFileGroupReader.HoodieFileGroupReaderIterator[InternalRow]]
+          val fileGroupReader = HoodieFileGroupReader.newBuilder()
+            .withReaderContext(readerContextFactory.getContext)
+            .withHoodieTableMetaClient(metaClient)
+            .withLatestCommitTime(latestInstantTime.requestedTime())
+            .withFileSlice(fileSlice)
+            .withDataSchema(tableSchemaWithMetaFields)
+            .withRequestedSchema(tableSchemaWithMetaFields)
+            .withInternalSchema(internalSchemaOption) // not support evolution of schema for now
+            .withProps(metaClient.getTableConfig.getProps)
+            .withShouldUseRecordPosition(false)
+            .withEnableOptimizedLogBlockScan(enableOptimizedLogBlockScan)
+            .build()
+          val iterator = fileGroupReader.getClosableIterator
+          CloseableIteratorListener.addListener(iterator)
           iterator.asScala
         })
       }
-      val dataFrame = HoodieUnsafeUtils.createDataFrameFromRDD(sparkSession, res, sparkSchemaWithMetaFields)
+      val dataFrame = sparkAdapter.getUnsafeUtils.createDataFrameFromRDD(sparkSession, res, sparkSchemaWithMetaFields)
       logInfo("Start to do bucket rescale for " + rescalePartitionsMap)
       val (success, _, _, _, _, _) = HoodieSparkSqlWriter.write(
         sparkSession.sqlContext,

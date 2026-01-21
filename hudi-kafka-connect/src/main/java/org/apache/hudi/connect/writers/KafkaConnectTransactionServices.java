@@ -26,6 +26,7 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -39,10 +40,9 @@ import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.sync.common.HoodieSyncConfig;
 import org.apache.hudi.sync.common.util.SyncUtilHelpers;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -56,9 +56,8 @@ import java.util.Set;
  * {@link TransactionCoordinator}
  * using {@link HoodieJavaWriteClient}.
  */
+@Slf4j
 public class KafkaConnectTransactionServices implements ConnectTransactionServices {
-
-  private static final Logger LOG = LoggerFactory.getLogger(KafkaConnectTransactionServices.class);
 
   private final KafkaConnectConfigs connectConfigs;
   private final Option<HoodieTableMetaClient> tableMetaClient;
@@ -90,8 +89,7 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
       String partitionColumns = KafkaConnectUtils.getPartitionColumnsForKeyGenerator(keyGenerator,
           connectConfigs.getProps());
 
-      LOG.info(String.format("Setting record key %s and partition fields %s for table %s",
-          recordKeyFields, partitionColumns, tableBasePath + tableName));
+      log.info("Setting record key {} and partition fields {} for table {}", recordKeyFields, partitionColumns, tableBasePath + tableName);
 
       tableMetaClient = Option.of(HoodieTableMetaClient.newTableBuilder()
           .setTableType(HoodieTableType.COPY_ON_WRITE.name())
@@ -100,6 +98,7 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
           .setRecordKeyFields(recordKeyFields)
           .setPartitionFields(partitionColumns)
           .setTableVersion(writeConfig.getWriteVersion())
+          .setTableFormat(connectConfigs.getStringOrDefault(HoodieTableConfig.TABLE_FORMAT))
           .setKeyGeneratorClassProp(writeConfig.getKeyGeneratorClass())
           .fromProperties(connectConfigs.getProps())
           .initTable(storageConf.newInstance(), tableBasePath));
@@ -114,7 +113,7 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
   public String startCommit() {
     String newCommitTime = javaClient.startCommit();
     javaClient.transitionInflight(newCommitTime);
-    LOG.info("Starting Hudi commit " + newCommitTime);
+    log.info("Starting Hudi commit {}", newCommitTime);
     return newCommitTime;
   }
 
@@ -122,16 +121,16 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
   public boolean endCommit(String commitTime, List<WriteStatus> writeStatuses, Map<String, String> extraMetadata) {
     boolean success = javaClient.commit(commitTime, writeStatuses, Option.of(extraMetadata));
     if (success) {
-      LOG.info("Ending Hudi commit " + commitTime);
+      log.info("Ending Hudi commit {}", commitTime);
 
       // Schedule clustering and compaction as needed.
       if (writeConfig.isAsyncClusteringEnabled()) {
         javaClient.scheduleClustering(Option.empty()).ifPresent(
-            instantTs -> LOG.info("Scheduled clustering at instant time:" + instantTs));
+            instantTs -> log.info("Scheduled clustering at instant time:{}", instantTs));
       }
       if (isAsyncCompactionEnabled()) {
         javaClient.scheduleCompaction(Option.empty()).ifPresent(
-            instantTs -> LOG.info("Scheduled compaction at instant time:" + instantTs));
+            instantTs -> log.info("Scheduled compaction at instant time:{}", instantTs));
       }
       syncMeta();
     }
@@ -145,7 +144,7 @@ public class KafkaConnectTransactionServices implements ConnectTransactionServic
       if (metadata.isPresent()) {
         return metadata.get().getExtraMetadata();
       } else {
-        LOG.info("Hoodie Extra Metadata from latest commit is absent");
+        log.info("Hoodie Extra Metadata from latest commit is absent");
         return Collections.emptyMap();
       }
     }

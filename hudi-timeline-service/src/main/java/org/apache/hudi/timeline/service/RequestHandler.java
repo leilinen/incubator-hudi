@@ -18,7 +18,6 @@
 
 package org.apache.hudi.timeline.service;
 
-import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.table.marker.MarkerOperation;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -29,20 +28,20 @@ import org.apache.hudi.common.table.timeline.dto.CompactionOpDTO;
 import org.apache.hudi.common.table.timeline.dto.FileGroupDTO;
 import org.apache.hudi.common.table.timeline.dto.FileSliceDTO;
 import org.apache.hudi.common.table.timeline.dto.InstantDTO;
-import org.apache.hudi.common.table.timeline.dto.InstantStateDTO;
 import org.apache.hudi.common.table.timeline.dto.TimelineDTO;
 import org.apache.hudi.common.table.view.FileSystemViewManager;
 import org.apache.hudi.common.table.view.RemoteHoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.SyncableFileSystemView;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.RemotePartitionHelper;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.timeline.service.handlers.BaseFileHandler;
 import org.apache.hudi.timeline.service.handlers.FileSliceHandler;
-import org.apache.hudi.timeline.service.handlers.InstantStateHandler;
 import org.apache.hudi.timeline.service.handlers.MarkerHandler;
+import org.apache.hudi.timeline.service.handlers.RemotePartitionerHandler;
 import org.apache.hudi.timeline.service.handlers.TimelineHandler;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -53,10 +52,10 @@ import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
 import io.javalin.http.Context;
 import io.javalin.http.Handler;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.jetbrains.annotations.NotNull;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
@@ -71,10 +70,10 @@ import java.util.concurrent.ScheduledExecutorService;
 /**
  * Main REST Handler class that handles and delegates calls to timeline relevant handlers.
  */
+@Slf4j
 public class RequestHandler {
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().registerModule(new AfterburnerModule());
-  private static final Logger LOG = LoggerFactory.getLogger(RequestHandler.class);
   private static final TypeReference<List<String>> LIST_TYPE_REFERENCE = new TypeReference<List<String>>() {
   };
 
@@ -85,12 +84,11 @@ public class RequestHandler {
   private final FileSliceHandler sliceHandler;
   private final BaseFileHandler dataFileHandler;
   private final MarkerHandler markerHandler;
-  private final InstantStateHandler instantStateHandler;
+  private RemotePartitionerHandler partitionerHandler;
   private final Registry metricsRegistry = Registry.getRegistry("TimelineService");
   private final ScheduledExecutorService asyncResultService;
 
   public RequestHandler(Javalin app, StorageConfiguration<?> conf, TimelineService.Config timelineServiceConfig,
-                        HoodieEngineContext hoodieEngineContext,
                         FileSystemViewManager viewManager) {
     this.timelineServiceConfig = timelineServiceConfig;
     this.viewManager = viewManager;
@@ -100,14 +98,12 @@ public class RequestHandler {
     this.dataFileHandler = new BaseFileHandler(conf, timelineServiceConfig, viewManager);
     if (timelineServiceConfig.enableMarkerRequests) {
       this.markerHandler = new MarkerHandler(
-          conf, timelineServiceConfig, hoodieEngineContext, viewManager, metricsRegistry);
+          conf, timelineServiceConfig, viewManager, metricsRegistry);
     } else {
       this.markerHandler = null;
     }
-    if (timelineServiceConfig.enableInstantStateRequests) {
-      this.instantStateHandler = new InstantStateHandler(conf, timelineServiceConfig, viewManager);
-    } else {
-      this.instantStateHandler = null;
+    if (timelineServiceConfig.enableRemotePartitioner) {
+      this.partitionerHandler = new RemotePartitionerHandler(conf, timelineServiceConfig, viewManager);
     }
     if (timelineServiceConfig.async) {
       this.asyncResultService = Executors.newSingleThreadScheduledExecutor();
@@ -122,24 +118,22 @@ public class RequestHandler {
    * @param ctx             Javalin context
    * @param obj             object to serialize
    * @param metricsRegistry {@code Registry} instance for storing metrics
-   * @param objectMapper    JSON object mapper
-   * @param logger          {@code Logger} instance
    * @return JSON String from the input object
    * @throws JsonProcessingException
    */
   public static String jsonifyResult(
-      Context ctx, Object obj, Registry metricsRegistry, ObjectMapper objectMapper, Logger logger)
+      Context ctx, Object obj, Registry metricsRegistry)
       throws JsonProcessingException {
     HoodieTimer timer = HoodieTimer.start();
     boolean prettyPrint = ctx.queryParam("pretty") != null;
     String result =
-        prettyPrint ? objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(obj)
-            : objectMapper.writeValueAsString(obj);
+        prettyPrint ? OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(obj)
+            : OBJECT_MAPPER.writeValueAsString(obj);
     final long jsonifyTime = timer.endTimer();
     metricsRegistry.add("WRITE_VALUE_CNT", 1);
     metricsRegistry.add("WRITE_VALUE_TIME", jsonifyTime);
-    if (logger.isDebugEnabled()) {
-      logger.debug("Jsonify TimeTaken={}", jsonifyTime);
+    if (log.isDebugEnabled()) {
+      log.debug("Jsonify TimeTaken={}", jsonifyTime);
     }
     return result;
   }
@@ -165,6 +159,10 @@ public class RequestHandler {
     return ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.MAX_INSTANT_PARAM, String.class).getOrThrow(e -> new HoodieException("MAX_INSTANT_PARAM is invalid"));
   }
 
+  private static String getCurrentInstantParamMandatory(Context ctx) {
+    return ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.CURRENT_INSTANT_PARAM, String.class).getOrThrow(e -> new HoodieException("MAX_INSTANT_PARAM is invalid"));
+  }
+
   private static String getMaxInstantParamOptional(Context ctx) {
     return ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.MAX_INSTANT_PARAM, String.class).getOrDefault("");
   }
@@ -183,10 +181,6 @@ public class RequestHandler {
             .getOrThrow(e -> new HoodieException("INCLUDE_FILES_IN_PENDING_COMPACTION_PARAM is invalid")));
   }
 
-  private static String getInstantStateDirPathParam(Context ctx) {
-    return ctx.queryParam(InstantStateHandler.INSTANT_STATE_DIR_PATH_PARAM);
-  }
-
   public void register() {
     registerDataFilesAPI();
     registerFileSlicesAPI();
@@ -194,8 +188,8 @@ public class RequestHandler {
     if (markerHandler != null) {
       registerMarkerAPI();
     }
-    if (instantStateHandler != null) {
-      registerInstantStateAPI();
+    if (partitionerHandler != null) {
+      registerRemotePartitionerAPI();
     }
   }
 
@@ -217,14 +211,14 @@ public class RequestHandler {
   }
 
   private void writeValueAsStringSync(Context ctx, Object obj) throws JsonProcessingException {
-    String result = jsonifyResult(ctx, obj, metricsRegistry, OBJECT_MAPPER, LOG);
+    String result = jsonifyResult(ctx, obj, metricsRegistry);
     ctx.result(result);
   }
 
   private void writeValueAsStringAsync(Context ctx, Object obj) {
     ctx.future(CompletableFuture.supplyAsync(() -> {
       try {
-        return jsonifyResult(ctx, obj, metricsRegistry, OBJECT_MAPPER, LOG);
+        return jsonifyResult(ctx, obj, metricsRegistry);
       } catch (JsonProcessingException e) {
         throw new HoodieException("Failed to JSON encode the value", e);
       }
@@ -389,6 +383,26 @@ public class RequestHandler {
       writeValueAsString(ctx, dtos);
     }, true));
 
+    app.get(RemoteHoodieTableFileSystemView.LATEST_SLICES_MERGED_BEFORE_ON_INSTANT_INFLIGHT_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("LATEST_SLICES_MERGED_BEFORE_ON_INSTANT_INFLIGHT", 1);
+      List<FileSliceDTO> dtos = sliceHandler.getLatestMergedFileSlicesBeforeOrOnIncludingInflight(
+          getBasePathParam(ctx),
+          getPartitionParam(ctx),
+          getMaxInstantParamMandatory(ctx),
+          getCurrentInstantParamMandatory(ctx));
+      writeValueAsString(ctx, dtos);
+    }, true));
+
+    app.get(RemoteHoodieTableFileSystemView.LATEST_SLICE_MERGED_BEFORE_ON_INSTANT_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("LATEST_SLICE_MERGED_BEFORE_ON_INSTANT", 1);
+      List<FileSliceDTO> dtos = sliceHandler.getLatestMergedFileSliceBeforeOrOn(
+          getBasePathParam(ctx),
+          getPartitionParam(ctx),
+          getMaxInstantParamMandatory(ctx),
+          getFileIdParam(ctx));
+      writeValueAsString(ctx, dtos);
+    }, true));
+
     app.get(RemoteHoodieTableFileSystemView.LATEST_SLICES_BEFORE_ON_INSTANT_URL, new ViewHandler(ctx -> {
       metricsRegistry.add("LATEST_SLICES_BEFORE_ON_INSTANT", 1);
       List<FileSliceDTO> dtos = sliceHandler.getLatestFileSlicesBeforeOrOn(
@@ -545,17 +559,13 @@ public class RequestHandler {
     }, false));
   }
 
-  private void registerInstantStateAPI() {
-    app.get(InstantStateHandler.ALL_INSTANT_STATE_URL, new ViewHandler(ctx -> {
-      metricsRegistry.add("ALL_INSTANT_STATE", 1);
-      List<InstantStateDTO> instantStates = instantStateHandler.getAllInstantStates(getInstantStateDirPathParam(ctx));
-      writeValueAsString(ctx, instantStates);
-    }, false));
-
-    app.post(InstantStateHandler.REFRESH_INSTANT_STATE, new ViewHandler(ctx -> {
-      metricsRegistry.add("REFRESH_INSTANT_STATE", 1);
-      boolean success = instantStateHandler.refresh(getInstantStateDirPathParam(ctx));
-      writeValueAsString(ctx, success);
+  private void registerRemotePartitionerAPI() {
+    app.get(RemotePartitionHelper.URL, new ViewHandler(ctx -> {
+      int partition = partitionerHandler.gePartitionIndex(
+          ctx.queryParamAsClass(RemotePartitionHelper.NUM_BUCKETS_PARAM, String.class).getOrDefault(""),
+          ctx.queryParamAsClass(RemotePartitionHelper.PARTITION_PATH_PARAM, String.class).getOrDefault(""),
+          ctx.queryParamAsClass(RemotePartitionHelper.PARTITION_NUM_PARAM, String.class).getOrDefault(""));
+      writeValueAsString(ctx, partition);
     }, false));
   }
 
@@ -574,13 +584,13 @@ public class RequestHandler {
       try {
         ugi = UserGroupInformation.getCurrentUser();
       } catch (Exception e) {
-        LOG.warn("Fail to get ugi", e);
+        log.error("Fail to get ugi", e);
         throw new HoodieException(e);
       }
     }
 
     @Override
-    public void handle(@NotNull Context context) throws Exception {
+    public void handle(@Nonnull Context context) throws Exception {
       ugi.doAs((PrivilegedExceptionAction<Void>) () -> {
         boolean success = true;
         long beginTs = System.currentTimeMillis();
@@ -621,9 +631,9 @@ public class RequestHandler {
         } catch (RuntimeException re) {
           success = false;
           if (re instanceof BadRequestResponse) {
-            LOG.warn("Bad request response due to client view behind server view. {}", re.getMessage());
+            log.warn("Bad request response due to client view behind server view. {}", re.getMessage());
           } else {
-            LOG.error(String.format("Got runtime exception servicing request %s", context.queryString()), re);
+            log.error("Got runtime exception servicing request {}", context.queryString(), re);
           }
           throw re;
         } finally {
@@ -635,8 +645,8 @@ public class RequestHandler {
           metricsRegistry.add("TOTAL_CHECK_TIME", finalCheckTimeTaken);
           metricsRegistry.add("TOTAL_API_CALLS", 1);
 
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("TimeTakenMillis[Total={}, Refresh={}, handle={}, Check={}], Success={}, Query={}, Host={}, synced={}",
+          if (log.isDebugEnabled()) {
+            log.debug("TimeTakenMillis[Total={}, Refresh={}, handle={}, Check={}], Success={}, Query={}, Host={}, synced={}",
                     timeTakenMillis, refreshCheckTimeTaken, handleTimeTaken, finalCheckTimeTaken, success, context.queryString(), context.host(), synced);
           }
         }
@@ -653,8 +663,8 @@ public class RequestHandler {
       String timelineHashFromClient = getTimelineHashParam(ctx);
       HoodieTimeline localTimeline =
           viewManager.getFileSystemView(basePath).getTimeline().filterCompletedOrMajorOrMinorCompactionInstants();
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Client [ LastTs={}, TimelineHash={}], localTimeline={}",lastKnownInstantFromClient, timelineHashFromClient, localTimeline.getInstants());
+      if (log.isDebugEnabled()) {
+        log.debug("Client [ LastTs={}, TimelineHash={}], localTimeline={}",lastKnownInstantFromClient, timelineHashFromClient, localTimeline.getInstants());
       }
 
       if ((!localTimeline.getInstantsAsStream().findAny().isPresent())
@@ -682,8 +692,8 @@ public class RequestHandler {
         if (isLocalViewBehind(ctx)) {
           String lastKnownInstantFromClient = getLastInstantTsParam(ctx);
           HoodieTimeline localTimeline = viewManager.getFileSystemView(basePath).getTimeline();
-          if (LOG.isInfoEnabled()) {
-            LOG.info("Syncing view as client passed last known instant {} as last known instant but server has the following last instant on timeline: {}",
+          if (log.isInfoEnabled()) {
+            log.info("Syncing view as client passed last known instant {} as last known instant but server has the following last instant on timeline: {}",
                 lastKnownInstantFromClient, localTimeline.lastInstant());
           }
           view.sync();

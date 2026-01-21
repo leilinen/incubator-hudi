@@ -22,10 +22,10 @@ package org.apache.hudi.storage.hadoop;
 import org.apache.hudi.common.fs.ConsistencyGuard;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
-import org.apache.hudi.hadoop.fs.HadoopSeekableDataInputStream;
 import org.apache.hudi.hadoop.fs.HoodieRetryWrapperFileSystem;
 import org.apache.hudi.hadoop.fs.HoodieWrapperFileSystem;
 import org.apache.hudi.io.SeekableDataInputStream;
+import org.apache.hudi.io.hadoop.HadoopSeekableDataInputStream;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
@@ -299,6 +299,8 @@ public class HoodieHadoopStorage extends HoodieStorage {
 
   @Override
   public void close() throws IOException {
-    fs.close();
+    // Don't close the wrapped `FileSystem` object.
+    // This will end up closing it for every thread since it
+    // could be cached across JVM. We don't own that object anyway.
   }
 }

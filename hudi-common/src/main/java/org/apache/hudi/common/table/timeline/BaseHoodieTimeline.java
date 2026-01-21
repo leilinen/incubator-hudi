@@ -18,15 +18,16 @@
 
 package org.apache.hudi.common.table.timeline;
 
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.exception.HoodieException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.hudi.exception.HoodieIOException;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.security.MessageDigest;
@@ -54,8 +55,6 @@ import static org.apache.hudi.common.util.StringUtils.getUTF8Bytes;
  * @see HoodieTimeline
  */
 public abstract class BaseHoodieTimeline implements HoodieTimeline {
-
-  private static final Logger LOG = LoggerFactory.getLogger(BaseHoodieTimeline.class);
 
   private static final long serialVersionUID = 1L;
 
@@ -113,6 +112,30 @@ public abstract class BaseHoodieTimeline implements HoodieTimeline {
     this.instants = mergeInstants(newInstants, this.instants);
     this.timelineHash = computeTimelineHash(this.instants);
     clearState();
+  }
+
+  /**
+   * Helper method to append loaded instants to the timeline, filtering out duplicates.
+   * This is used by both time-range and limit-based loading to avoid code duplication.
+   *
+   * @param loadedInstants The list of instants that were loaded to readCommit field of timeline
+   */
+  protected void appendLoadedInstants(List<HoodieInstant> loadedInstants) {
+    List<HoodieInstant> existingInstants = getInstants();
+    List<HoodieInstant> newInstants = loadedInstants.stream()
+        .filter(instant -> !existingInstants.contains(instant))
+        .collect(Collectors.toList());
+    if (!newInstants.isEmpty()) {
+      appendInstants(newInstants);
+    }
+  }
+
+  protected List<HoodieInstant> getInstantsFromFileSystem(HoodieTableMetaClient metaClient, Set<String> includedExtensions, boolean applyLayoutFilters) {
+    try {
+      return metaClient.scanHoodieInstantsFromFileSystem(metaClient.getTimelinePath(), includedExtensions, applyLayoutFilters);
+    } catch (IOException e) {
+      throw new HoodieIOException("Failed to scan metadata", e);
+    }
   }
 
   @Override
@@ -256,7 +279,7 @@ public abstract class BaseHoodieTimeline implements HoodieTimeline {
   @Override
   public HoodieTimeline findInstantsInRangeByCompletionTime(String startTs, String endTs) {
     return factory.createDefaultTimeline(
-        getInstantsAsStream().filter(s -> s.getCompletionTime() != null && InstantComparison.isInClosedRange(s.getCompletionTime(), startTs, endTs)),
+        getInstantsAsStream().filter(s -> s.getCompletionTime() != null && InstantComparison.isInRange(s.getCompletionTime(), startTs, endTs)),
         getInstantReader());
   }
 
@@ -492,6 +515,11 @@ public abstract class BaseHoodieTimeline implements HoodieTimeline {
   public Stream<HoodieInstant> getInstantsOrderedByCompletionTime() {
     return getInstantsAsStream().filter(s -> s.getCompletionTime() != null)
         .sorted(instantComparator.completionTimeOrderedComparator());
+  }
+
+  @Override
+  public Stream<HoodieInstant> getReverseOrderedInstantsByCompletionTime() {
+    return getInstantsAsStream().sorted(instantComparator.completionTimeOrderedComparator().reversed());
   }
 
   @Override

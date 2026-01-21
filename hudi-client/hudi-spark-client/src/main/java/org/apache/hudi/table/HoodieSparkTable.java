@@ -19,7 +19,6 @@
 package org.apache.hudi.table;
 
 import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.client.utils.SparkPartitionUtils;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
@@ -30,16 +29,12 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieMetadataException;
-import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.index.SparkHoodieIndexFactory;
-import org.apache.hudi.io.HoodieMergeHandle;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metadata.SparkMetadataWriterFactory;
-import org.apache.hudi.table.action.commit.HoodieMergeHelper;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.TaskContext;
 import org.apache.spark.TaskContext$;
 
@@ -75,7 +70,11 @@ public abstract class HoodieSparkTable<T>
         hoodieSparkTable = new HoodieSparkCopyOnWriteTable<>(config, context, metaClient);
         break;
       case MERGE_ON_READ:
-        hoodieSparkTable = new HoodieSparkMergeOnReadTable<>(config, context, metaClient);
+        if (metaClient.isMetadataTable()) {
+          hoodieSparkTable = new HoodieSparkMergeOnReadMetadataTable<>(config, context, metaClient);
+        } else {
+          hoodieSparkTable = new HoodieSparkMergeOnReadTable<>(config, context, metaClient);
+        }
         break;
       default:
         throw new HoodieException("Unsupported table type :" + metaClient.getTableType());
@@ -96,18 +95,25 @@ public abstract class HoodieSparkTable<T>
   @Override
   protected Option<HoodieTableMetadataWriter> getMetadataWriter(
       String triggeringInstantTimestamp,
-      HoodieFailedWritesCleaningPolicy failedWritesCleaningPolicy) {
+      HoodieFailedWritesCleaningPolicy failedWritesCleaningPolicy,
+      boolean streamingWrites,
+      boolean autoDetectAndDeleteMetadataPartitions) {
+    if (isMetadataTable()) {
+      return Option.empty();
+    }
     if (config.isMetadataTableEnabled()) {
       // if any partition is deleted, we need to reload the metadata table writer so that new table configs are picked up
       // to reflect the delete mdt partitions.
-      deleteMetadataIndexIfNecessary();
+      if (autoDetectAndDeleteMetadataPartitions) {
+        deleteMetadataIndexIfNecessary();
+      }
 
       // Create the metadata table writer. First time after the upgrade this creation might trigger
       // metadata table bootstrapping. Bootstrapping process could fail and checking the table
       // existence after the creation is needed.
-      HoodieTableMetadataWriter metadataWriter = SparkMetadataWriterFactory.create(
-          getContext().getStorageConf(), config, failedWritesCleaningPolicy, getContext(),
-          Option.of(triggeringInstantTimestamp), metaClient.getTableConfig());
+      HoodieTableMetadataWriter metadataWriter = streamingWrites
+          ? SparkMetadataWriterFactory.createWithStreamingWrites(getContext().getStorageConf(), config, failedWritesCleaningPolicy, getContext(), Option.of(triggeringInstantTimestamp))
+          : SparkMetadataWriterFactory.create(getContext().getStorageConf(), config, failedWritesCleaningPolicy, getContext(), Option.of(triggeringInstantTimestamp), metaClient.getTableConfig());
       try {
         if (isMetadataTableExists || metaClient.getStorage().exists(
             HoodieTableMetadata.getMetadataTableBasePath(metaClient.getBasePath()))) {
@@ -130,22 +136,4 @@ public abstract class HoodieSparkTable<T>
     final TaskContext taskContext = TaskContext.get();
     return () -> TaskContext$.MODULE$.setTaskContext(taskContext);
   }
-
-  @Override
-  public void runMerge(HoodieMergeHandle<?, ?, ?, ?> upsertHandle, String instantTime, String fileId) throws IOException {
-    if (upsertHandle.getOldFilePath() == null) {
-      throw new HoodieUpsertException("Error in finding the old file path at commit " + instantTime + " for fileId: " + fileId);
-    } else {
-      if (upsertHandle.baseFileForMerge().getBootstrapBaseFile().isPresent()) {
-        Option<String[]> partitionFields = getMetaClient().getTableConfig().getPartitionFields();
-        Object[] partitionValues = SparkPartitionUtils.getPartitionFieldVals(partitionFields, upsertHandle.getPartitionPath(),
-            getMetaClient().getTableConfig().getBootstrapBasePath().get(),
-            upsertHandle.getWriterSchema(), getStorageConf().unwrapAs(Configuration.class));
-        upsertHandle.setPartitionFields(partitionFields);
-        upsertHandle.setPartitionValues(partitionValues);
-      }
-      HoodieMergeHelper.newInstance().runMerge(this, upsertHandle);
-    }
-  }
-
 }

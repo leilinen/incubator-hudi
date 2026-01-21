@@ -46,10 +46,9 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.action.compact.OperationResult;
 import org.apache.hudi.utilities.UtilHelpers;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.launcher.SparkLauncher;
 import org.apache.spark.util.Utils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.shell.standard.ShellComponent;
 import org.springframework.shell.standard.ShellMethod;
 import org.springframework.shell.standard.ShellOption;
@@ -75,9 +74,8 @@ import static org.apache.hudi.util.JavaScalaConverters.convertJavaPropertiesToSc
  * CLI command to display compaction related options.
  */
 @ShellComponent
+@Slf4j
 public class CompactionCommand {
-
-  private static final Logger LOG = LoggerFactory.getLogger(CompactionCommand.class);
 
   private static final String TMP_DIR = "/tmp/";
 
@@ -199,22 +197,20 @@ public class CompactionCommand {
     boolean initialized = HoodieCLI.initConf();
     HoodieCLI.initFS(initialized);
 
-    // First get a compaction instant time and pass it to spark launcher for scheduling compaction
-    String compactionInstantTime = client.createNewInstantTime();
-
     String sparkPropertiesPath =
         Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
+    String tableName = client.getTableConfig().getTableName();
     SparkMain.addAppArgs(sparkLauncher, SparkCommand.COMPACT_SCHEDULE, master, sparkMemory, HoodieCLI.basePath,
-        client.getTableConfig().getTableName(), compactionInstantTime, propsFilePath);
+        tableName, propsFilePath);
     UtilHelpers.validateAndAddProperties(configs, sparkLauncher);
     Process process = sparkLauncher.launch();
     InputStreamConsumer.captureOutput(process);
     int exitCode = process.waitFor();
     if (exitCode != 0) {
-      return "Failed to run compaction for " + compactionInstantTime;
+      return "Failed to run compaction for " + tableName;
     }
-    return COMPACTION_SCH_SUCCESSFUL + compactionInstantTime;
+    return COMPACTION_SCH_SUCCESSFUL + tableName;
   }
 
   @ShellMethod(key = "compaction run", value = "Run Compaction for given instant time")
@@ -436,7 +432,7 @@ public class CompactionCommand {
     ObjectInputStream in = new ObjectInputStream(inputStream);
     try {
       T result = (T) in.readObject();
-      LOG.info("Result : " + result);
+      log.info("Result : " + result);
       return result;
     } finally {
       in.close();

@@ -21,7 +21,8 @@ package org.apache.spark.sql.hudi.analysis
 
 import org.apache.hudi.DataSourceWriteOptions
 import org.apache.hudi.common.config.RecordMergeMode
-import org.apache.hudi.config.{HoodieHBaseIndexConfig, HoodieIndexConfig}
+import org.apache.hudi.common.table.{HoodieTableConfig, PartialUpdateMode}
+import org.apache.hudi.config.HoodieIndexConfig
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.index.HoodieIndex
 
@@ -34,8 +35,7 @@ class TestMergeIntoHoodieTableCommand extends AnyFlatSpec with Matchers {
     val globalIndices = Seq(
       HoodieIndex.IndexType.GLOBAL_SIMPLE -> HoodieIndexConfig.SIMPLE_INDEX_UPDATE_PARTITION_PATH_ENABLE,
       HoodieIndex.IndexType.GLOBAL_BLOOM -> HoodieIndexConfig.BLOOM_INDEX_UPDATE_PARTITION_PATH_ENABLE,
-      HoodieIndex.IndexType.RECORD_INDEX -> HoodieIndexConfig.RECORD_INDEX_UPDATE_PARTITION_PATH_ENABLE,
-      HoodieIndex.IndexType.HBASE -> HoodieHBaseIndexConfig.UPDATE_PARTITION_PATH_ENABLE
+      HoodieIndex.IndexType.RECORD_INDEX -> HoodieIndexConfig.RECORD_INDEX_UPDATE_PARTITION_PATH_ENABLE
     )
 
     globalIndices.foreach { case (indexType, config) =>
@@ -51,8 +51,7 @@ class TestMergeIntoHoodieTableCommand extends AnyFlatSpec with Matchers {
     val globalIndices = Seq(
       HoodieIndex.IndexType.GLOBAL_SIMPLE -> HoodieIndexConfig.SIMPLE_INDEX_UPDATE_PARTITION_PATH_ENABLE,
       HoodieIndex.IndexType.GLOBAL_BLOOM -> HoodieIndexConfig.BLOOM_INDEX_UPDATE_PARTITION_PATH_ENABLE,
-      HoodieIndex.IndexType.RECORD_INDEX -> HoodieIndexConfig.RECORD_INDEX_UPDATE_PARTITION_PATH_ENABLE,
-      HoodieIndex.IndexType.HBASE -> HoodieHBaseIndexConfig.UPDATE_PARTITION_PATH_ENABLE
+      HoodieIndex.IndexType.RECORD_INDEX -> HoodieIndexConfig.RECORD_INDEX_UPDATE_PARTITION_PATH_ENABLE
     )
 
     globalIndices.foreach { case (indexType, config) =>
@@ -104,5 +103,22 @@ class TestMergeIntoHoodieTableCommand extends AnyFlatSpec with Matchers {
   it should "throw HoodieException when merge mode is missing" in {
     val params = Map.empty[String, String]
     an[HoodieException] should be thrownBy MergeIntoHoodieTableCommand.useCustomMergeMode(params)
+  }
+
+  it should "return empty when no partial update mode parameter is provided" in {
+    val params: Map[String, String] = Map()
+    MergeIntoHoodieTableCommand.getPartialUpdateMode(params).isDefined should be(false)
+  }
+
+  it should "return non-empty when partial update mode parameter is provided" in {
+    var params: Map[String, String] = Map(
+      HoodieTableConfig.PARTIAL_UPDATE_MODE.key -> PartialUpdateMode.IGNORE_DEFAULTS.name
+    )
+    MergeIntoHoodieTableCommand.getPartialUpdateMode(params).isDefined should be (true)
+
+    params = Map(
+      HoodieTableConfig.PARTIAL_UPDATE_MODE.key -> PartialUpdateMode.FILL_UNAVAILABLE.name
+    )
+    MergeIntoHoodieTableCommand.getPartialUpdateMode(params).isDefined should be(true)
   }
 }

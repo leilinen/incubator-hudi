@@ -22,14 +22,14 @@ import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.RetryHelper;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.module.afterburner.AfterburnerModule;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
@@ -39,8 +39,6 @@ import java.util.Map;
  * to the Timeline Server from the executors.
  */
 public abstract class TimelineServiceClientBase implements Serializable {
-
-  private static final Logger LOG = LoggerFactory.getLogger(TimelineServiceClientBase.class);
 
   private RetryHelper<Response, IOException> retryHelper;
 
@@ -61,34 +59,20 @@ public abstract class TimelineServiceClientBase implements Serializable {
     return  (retryHelper != null) ? retryHelper.start(() -> executeRequest(request)) : executeRequest(request);
   }
 
+  @AllArgsConstructor
+  @Getter
   public static class Request {
+
     private final TimelineServiceClient.RequestMethod method;
     private final String path;
     private final Option<Map<String, String>> queryParameters;
-
-    private Request(TimelineServiceClient.RequestMethod method, String path, Option<Map<String, String>> queryParameters) {
-      this.method = method;
-      this.path = path;
-      this.queryParameters = queryParameters;
-    }
-
-    public RequestMethod getMethod() {
-      return method;
-    }
-
-    public String getPath() {
-      return path;
-    }
-
-    public Option<Map<String, String>> getQueryParameters() {
-      return queryParameters;
-    }
 
     public static TimelineServiceClient.Request.Builder newBuilder(TimelineServiceClient.RequestMethod method, String path) {
       return new TimelineServiceClient.Request.Builder(method, path);
     }
 
     public static class Builder {
+
       private final TimelineServiceClient.RequestMethod method;
       private final String path;
       private Option<Map<String, String>> queryParameters;
@@ -119,18 +103,18 @@ public abstract class TimelineServiceClientBase implements Serializable {
 
   public static class Response {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().registerModule(new AfterburnerModule());
-    private final String content;
+    private final InputStream content;
 
-    public Response(String content) {
+    public Response(InputStream content) {
       this.content = content;
     }
 
-    public String getContent() {
-      return content;
-    }
-
-    public <T> T getDecodedContent(TypeReference reference) throws JsonProcessingException {
-      return (T) OBJECT_MAPPER.readValue(content, reference);
+    public <T> T getDecodedContent(TypeReference reference) throws IOException {
+      try {
+        return (T) OBJECT_MAPPER.readValue(content, reference);
+      } finally {
+        content.close();
+      }
     }
   }
 

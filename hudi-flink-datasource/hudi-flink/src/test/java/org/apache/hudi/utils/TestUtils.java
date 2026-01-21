@@ -18,6 +18,7 @@
 
 package org.apache.hudi.utils;
 
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
@@ -43,6 +44,8 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -117,7 +120,7 @@ public class TestUtils {
   }
 
   public static StreamReadMonitoringFunction getMonitorFunc(Configuration conf) {
-    final String basePath = conf.getString(FlinkOptions.PATH);
+    final String basePath = conf.get(FlinkOptions.PATH);
     return new StreamReadMonitoringFunction(conf, new Path(basePath), TestConfigurations.ROW_TYPE, 1024 * 1024L, null);
   }
 
@@ -149,11 +152,28 @@ public class TestUtils {
 
   public static String amendCompletionTimeToLatest(HoodieTableMetaClient metaClient, java.nio.file.Path sourcePath, String instantTime) throws IOException {
     String fileExt = sourcePath.getFileName().toString().split("\\.")[1];
-    String newCompletionTime = metaClient.createNewInstantTime();
+    String newCompletionTime = WriteClientTestUtils.createNewInstantTime();
     String newFileName = instantTime + "_" + newCompletionTime + "." + fileExt;
 
     java.nio.file.Path newFilePath = sourcePath.getParent().resolve(newFileName);
     Files.move(sourcePath, newFilePath);
     return newCompletionTime;
+  }
+
+  /**
+   * Waits for a condition to be met within a specific timeout.
+   *
+   * @param condition      The condition to poll.
+   * @param timeoutSeconds Maximum time to wait in seconds.
+   */
+  public static boolean waitUntil(BooleanSupplier condition, int timeoutSeconds) throws InterruptedException {
+    long limit = System.currentTimeMillis() + (timeoutSeconds * 1000L);
+    while (System.currentTimeMillis() < limit) {
+      if (condition.getAsBoolean()) {
+        return true;
+      }
+      TimeUnit.SECONDS.sleep(1);
+    }
+    return false;
   }
 }
